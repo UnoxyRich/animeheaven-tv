@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <path
+        android:fillColor="#000000"
+        android:pathData="M0,0h320v180h-320z" />
+
+    <!-- Top and bottom crimson accent borders -->
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M0,0h320v6h-320z" />
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M0,174h320v6h-320z" />
+
+    <!-- Surface badge -->
+    <path
+        android:fillColor="#121212"
+        android:pathData="M24,36h272v108h-272z" />
+
+    <!-- Crimson square emblem -->
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M42,54h72v72h-72z" />
+
+    <!-- Stylized AH monogram inside emblem -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M53,110l12,-40h9l12,40h-8l-2.5,-9h-12l-2.5,9zM65,94h9l-4.5,-16z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M88,70h7v16h10v-16h7v40h-7v-17h-10v17h-7z" />
+
+    <!-- Bold geometric wordmark bars representing ANIME HEAVEN TV -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M132,68h144v12h-144z"
+        android:fillAlpha="0.0" />
+    <!-- Text drawn cleanly with paths: "ANIME" bar + "HEAVEN" crimson accent bar -->
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M134,88h142v4h-142z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M134,64h18v4h-18zM134,72h18v4h-18zM134,64h4v16h-4zM148,64h4v16h-4z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M158,64h4v16h-4zM162,64l8,16h4l-8,-16zM170,64h4v16h-4z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M180,64h4v16h-4z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M190,64h4v16h-4zM194,64l4,10l4,-10h4v16h-4v-9l-3,7h-2l-3,-7v9h-4z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M212,64h14v4h-14zM212,70h11v4h-11zM212,76h14v4h-14zM212,64h4v16h-4z" />
+
+    <!-- HEAVEN in crimson/white -->
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M134,100h4v16h-4zM138,106h8v4h-8zM146,100h4v16h-4z" />
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M156,100h14v4h-14zM156,106h11v4h-11zM156,112h14v4h-14zM156,100h4v16h-4z" />
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M174,116l6,-16h5l6,16h-4l-1.5,-4h-6l-1.5,4zM180.5,109h4l-2,-6z" />
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M194,100h4l5,11l5,-11h4l-7,16h-4z" />
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M216,100h14v4h-14zM216,106h11v4h-11zM216,112h14v4h-14zM216,100h4v16h-4z" />
+    <path
+        android:fillColor="#DD0021"
+        android:pathData="M236,100h4v16h-4zM240,100l8,16h4l-8,-16zM248,100h4v16h-4z" />
+
+    <!-- TV tag -->
+    <path
+        android:fillColor="#BDBDBD"
+        android:pathData="M260,100h14v3h-14zM265.5,103h3v13h-3z" />
+</vector>

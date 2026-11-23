@@ -1,0 +1,558 @@
+package me.animeheaven.tv.ui.screens.settings
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
+import me.animeheaven.tv.data.local.AppSettingsStore
+import me.animeheaven.tv.data.model.AhThemeId
+import me.animeheaven.tv.data.model.FeedViewMode
+import me.animeheaven.tv.data.model.KeyboardMode
+import me.animeheaven.tv.data.model.PreloadMode
+import me.animeheaven.tv.data.repository.AnimeHeavenRepository
+import me.animeheaven.tv.ui.components.AhFocusableBox
+import me.animeheaven.tv.ui.components.AhIcons
+import me.animeheaven.tv.ui.components.AhOverscanHorizontal
+import me.animeheaven.tv.ui.components.AhOverscanVertical
+import me.animeheaven.tv.ui.components.AhShape3
+import me.animeheaven.tv.ui.components.AhShape4
+import me.animeheaven.tv.ui.components.AhStaticFocusableBox
+import me.animeheaven.tv.ui.theme.LocalAhPalette
+import me.animeheaven.tv.ui.theme.paletteFor
+
+private val THEME_ROWS = AhThemeId.entries.chunked(4)
+private val SKIP_OP_SECONDS_OPTIONS = listOf(60, 85, 90)
+
+@Composable
+fun SettingsScreen(
+    settingsStore: AppSettingsStore,
+    repository: AnimeHeavenRepository,
+    onGetCacheSummary: suspend () -> String = { "" },
+    onClearAllCaches: suspend () -> Unit = {},
+    onBack: () -> Unit
+) {
+    val settings by settingsStore.settings.collectAsStateWithLifecycle()
+    val palette = LocalAhPalette.current
+    val scope = rememberCoroutineScope()
+    var statusBanner by remember { mutableStateOf<String?>(null) }
+    var cacheSummary by remember { mutableStateOf("Calculating...") }
+
+    LaunchedEffect(Unit) {
+        cacheSummary = onGetCacheSummary()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = AhOverscanHorizontal, vertical = AhOverscanVertical)
+    ) {
+        // Header Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(palette.surface, AhShape3)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            AhStaticFocusableBox(
+                onClick = onBack,
+                modifier = Modifier.size(40.dp),
+                containerColor = palette.surfaceElevated,
+                focusedContainerColor = palette.crimson,
+                focusedBorderColor = Color.White
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White
+                    )
+                }
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Settings & Themes",
+                    color = palette.textPrimary,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Customize AnimeHeaven TV theme, keyboard, playback & history",
+                    color = palette.textSecondary,
+                    fontSize = 13.sp
+                )
+            }
+
+            if (statusBanner != null) {
+                Box(
+                    modifier = Modifier
+                        .background(palette.crimson, AhShape4)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = statusBanner.orEmpty(),
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // Theme Picker Section
+            item(key = "theme_section") {
+                SettingsCard(title = "AnimeHeaven Theme") {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        THEME_ROWS.forEach { rowThemes ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                rowThemes.forEach { theme ->
+                                    val preview = paletteFor(theme)
+                                    val selected = settings.themeId == theme
+                                    AhStaticFocusableBox(
+                                        onClick = {
+                                            settingsStore.setTheme(theme)
+                                            statusBanner = "Theme: ${theme.displayName}"
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        containerColor = palette.surfaceElevated,
+                                        unfocusedBorderColor = if (selected) palette.crimson else palette.borderSubtle,
+                                        borderWidth = if (selected) 2.dp else 1.dp,
+                                        focusedBorderWidth = 2.5.dp
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .clip(CircleShape)
+                                                    .then(
+                                                        if (preview.backgroundBrush != null) {
+                                                            Modifier.background(preview.backgroundBrush)
+                                                        } else {
+                                                            Modifier.background(preview.background)
+                                                        }
+                                                    )
+                                                    .border(2.dp, preview.crimson, CircleShape),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                if (selected) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Check,
+                                                        contentDescription = "Selected",
+                                                        tint = preview.crimson,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = theme.displayName,
+                                                    color = palette.textPrimary,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1
+                                                )
+                                                Text(
+                                                    text = theme.subtitle,
+                                                    color = palette.textMuted,
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                                repeat(4 - rowThemes.size) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Default Keyboard Layout + View Mode
+            item(key = "ui_preferences") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    SettingsCard(
+                        title = "Default Search Keyboard",
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OptionChip(
+                                label = "QWERTY (Default)",
+                                selected = settings.defaultKeyboardMode == KeyboardMode.QWERTY,
+                                onClick = {
+                                    settingsStore.setDefaultKeyboardMode(KeyboardMode.QWERTY)
+                                    statusBanner = "Keyboard: QWERTY"
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            OptionChip(
+                                label = "ABC Grid",
+                                selected = settings.defaultKeyboardMode == KeyboardMode.ABC,
+                                onClick = {
+                                    settingsStore.setDefaultKeyboardMode(KeyboardMode.ABC)
+                                    statusBanner = "Keyboard: ABC"
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    SettingsCard(
+                        title = "Default Catalog View",
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OptionChip(
+                                label = "List View",
+                                selected = settings.defaultViewMode == FeedViewMode.LIST,
+                                onClick = {
+                                    settingsStore.setDefaultViewMode(FeedViewMode.LIST)
+                                    statusBanner = "Default View: List"
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            OptionChip(
+                                label = "Grid View",
+                                selected = settings.defaultViewMode == FeedViewMode.GRID,
+                                onClick = {
+                                    settingsStore.setDefaultViewMode(FeedViewMode.GRID)
+                                    statusBanner = "Default View: Grid"
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Playback Preferences
+            item(key = "playback_preferences") {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        SettingsCard(
+                            title = "Auto-Play Next Episode",
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OptionChip(
+                                    label = "On (Recommended)",
+                                    selected = settings.autoPlayNext,
+                                    onClick = {
+                                        settingsStore.setAutoPlayNext(true)
+                                        statusBanner = "Auto-Play Next: On"
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OptionChip(
+                                    label = "Off",
+                                    selected = !settings.autoPlayNext,
+                                    onClick = {
+                                        settingsStore.setAutoPlayNext(false)
+                                        statusBanner = "Auto-Play Next: Off"
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+
+                        SettingsCard(
+                            title = "Skip Opening (OP) Duration",
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                SKIP_OP_SECONDS_OPTIONS.forEach { seconds ->
+                                    OptionChip(
+                                        label = "${seconds}s",
+                                        selected = settings.skipOpSeconds == seconds,
+                                        onClick = {
+                                            settingsStore.setSkipOpSeconds(seconds)
+                                            statusBanner = "Skip OP: ${seconds}s"
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    SettingsCard(title = "Skip OP & ED Prompt (7s OK Button)") {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OptionChip(
+                                label = "On (Default)",
+                                selected = settings.skipPromptEnabled,
+                                onClick = {
+                                    settingsStore.setSkipPromptEnabled(true)
+                                    statusBanner = "Skip OP/ED Prompt: On"
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            OptionChip(
+                                label = "Off",
+                                selected = !settings.skipPromptEnabled,
+                                onClick = {
+                                    settingsStore.setSkipPromptEnabled(false)
+                                    statusBanner = "Skip OP/ED Prompt: Off"
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    SettingsCard(title = "Preload & Prefetch Strategy") {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                PreloadMode.entries.forEach { mode ->
+                                    OptionChip(
+                                        label = mode.displayName,
+                                        selected = settings.preloadMode == mode,
+                                        onClick = {
+                                            settingsStore.setPreloadMode(mode)
+                                            statusBanner = "Preload: ${mode.displayName}"
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = settings.preloadMode.subtitle,
+                                color = palette.textMuted,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Data & History Management
+            item(key = "data_management") {
+                SettingsCard(title = "Local History & Storage") {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (cacheSummary.isNotBlank()) {
+                            Text(
+                                text = "Offline Cache: $cacheSummary",
+                                color = palette.textSecondary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            AhStaticFocusableBox(
+                                onClick = {
+                                    scope.launch {
+                                        repository.clearWatchHistory()
+                                        statusBanner = "Watch history cleared"
+                                    }
+                                },
+                                containerColor = palette.surfaceElevated,
+                                focusedContainerColor = palette.crimson,
+                                unfocusedBorderColor = palette.borderSubtle,
+                                focusedBorderColor = Color.White
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = AhIcons.DeleteSweep,
+                                        contentDescription = null,
+                                        tint = Color.White
+                                    )
+                                    Text(
+                                        text = "Clear Continue Watching & Progress",
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+
+                            AhStaticFocusableBox(
+                                onClick = {
+                                    scope.launch {
+                                        repository.clearSearchHistory()
+                                        statusBanner = "Search history cleared"
+                                    }
+                                },
+                                containerColor = palette.surfaceElevated,
+                                focusedContainerColor = palette.crimson,
+                                unfocusedBorderColor = palette.borderSubtle,
+                                focusedBorderColor = Color.White
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = AhIcons.DeleteSweep,
+                                        contentDescription = null,
+                                        tint = Color.White
+                                    )
+                                    Text(
+                                        text = "Clear Recent Searches",
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+
+                        AhStaticFocusableBox(
+                            onClick = {
+                                scope.launch {
+                                    onClearAllCaches()
+                                    cacheSummary = onGetCacheSummary()
+                                    statusBanner = "Offline web, image & video caches cleared"
+                                }
+                            },
+                            containerColor = palette.surfaceElevated,
+                            focusedContainerColor = palette.crimson,
+                            unfocusedBorderColor = palette.borderSubtle,
+                            focusedBorderColor = Color.White
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = AhIcons.DeleteSweep,
+                                    contentDescription = null,
+                                    tint = Color.White
+                                )
+                                Text(
+                                    text = "Clear Offline Cache (Web • Images • Video)",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsCard(
+    title: String,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    val palette = LocalAhPalette.current
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(palette.surface, AhShape4)
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = title,
+            color = palette.textPrimary,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Bold
+        )
+        content()
+    }
+}
+
+@Composable
+private fun OptionChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalAhPalette.current
+    AhFocusableBox(
+        onClick = onClick,
+        modifier = modifier,
+        containerColor = if (selected) palette.crimson else palette.surfaceElevated,
+        focusedContainerColor = Color.White,
+        unfocusedBorderColor = if (selected) palette.crimson else palette.borderSubtle,
+        focusedBorderColor = palette.crimson
+    ) { isFocused ->
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 10.dp, horizontal = 10.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = label,
+                color = when {
+                    isFocused -> palette.crimson
+                    selected -> Color.White
+                    else -> palette.textSecondary
+                },
+                fontSize = 14.sp,
+                fontWeight = if (selected || isFocused) FontWeight.Bold else FontWeight.Medium,
+                maxLines = 1
+            )
+        }
+    }
+}
