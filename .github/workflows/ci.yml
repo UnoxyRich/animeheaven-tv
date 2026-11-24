@@ -35,7 +35,7 @@ jobs:
           "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
 
       - name: Run JVM tests and lint, compile Android UI tests & build R8 release APK
         run: ./gradlew testDebugUnitTest lintDebug compileDebugAndroidTestKotlin assembleRelease -PcomposeCompilerReports=true
@@ -75,7 +75,7 @@ jobs:
           "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
 
       - name: Build walkthrough APKs before booting the emulator
         run: |
@@ -83,19 +83,29 @@ jobs:
           ./gradlew --stop
           jps -l | awk '/KotlinCompileDaemon/ { print $1 }' | xargs -r kill
 
-      - name: Boot Android TV Emulator (API 34, tv_1080p) & capture walkthrough screenshots
-        timeout-minutes: 14
-        uses: reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
+      - name: Cache the AVD configuration (not app data or snapshots)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          api-level: 34
+          path: |
+            ~/.android/avd/animeheaven-tv.ini
+            ~/.android/avd/animeheaven-tv.avd/config.ini
+          key: android-avd-tv-v1-${{ runner.os }}-36-x86_64
+
+      - name: Boot Android TV Emulator (API 36, tv_1080p) & capture walkthrough screenshots
+        timeout-minutes: 14
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 36
           emulator-boot-timeout: 360
           target: android-tv
-          arch: x86
+          arch: x86_64
+          avd-name: animeheaven-tv
+          force-avd-creation: false
           profile: tv_1080p
-          ram-size: 2048M
+          ram-size: 3072M
           disk-size: 4096M
           disable-animations: true
-          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -feature -Vulkan -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-snapshot -no-window -gpu swangle -noaudio -no-boot-anim -camera-back none
           script: bash .github/scripts/run-ui-walkthrough.sh me.animeheaven.tv
 
       - name: Upload TV App Screenshots
