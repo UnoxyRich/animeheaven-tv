@@ -1,5 +1,6 @@
 package me.animeheaven.tv
 
+import android.graphics.Bitmap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -8,6 +9,10 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import java.io.File
+import java.io.FileOutputStream
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -19,44 +24,90 @@ class TvUiSmokeTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun appLaunchesAndRendersTvHeader() {
-        composeRule.waitUntil(timeoutMillis = 15_000L) {
-            composeRule.onAllNodesWithText("Search").fetchSemanticsNodes().isNotEmpty()
-        }
-        composeRule.onAllNodesWithText("Search").onFirst().assertIsDisplayed()
+    fun fullAppWalkthroughCapturesScreenshots() {
+        waitForText("Search", timeoutMs = 15_000L)
         composeRule.onNodeWithContentDescription("Settings & Themes").assertIsDisplayed()
-    }
+        settle(3_000L)
+        saveScreenshot("01-tv-home")
 
-    @Test
-    fun navigateToSettingsSwitchThemeAndReturn() {
-        composeRule.waitUntil(timeoutMillis = 15_000L) {
-            composeRule.onAllNodesWithText("Search").fetchSemanticsNodes().isNotEmpty()
-        }
-        composeRule.onNodeWithContentDescription("Settings & Themes").performClick()
+        // New Releases tab
+        composeRule.onAllNodesWithText("New").onFirst().performClick()
+        settle(2_500L)
+        saveScreenshot("02-tv-new")
 
-        composeRule.waitUntil(timeoutMillis = 10_000L) {
-            composeRule.onAllNodesWithText("Settings & Themes").fetchSemanticsNodes().isNotEmpty()
-        }
-        composeRule.onNodeWithText("Settings & Themes").assertIsDisplayed()
-        composeRule.onNodeWithText("Midnight Indigo").performClick()
-        composeRule.onNodeWithContentDescription("Back").performClick()
+        // Popular tab
+        composeRule.onAllNodesWithText("Popular").onFirst().performClick()
+        settle(2_500L)
+        saveScreenshot("03-tv-popular")
 
-        composeRule.waitUntil(timeoutMillis = 10_000L) {
-            composeRule.onAllNodesWithText("Search").fetchSemanticsNodes().isNotEmpty()
-        }
-    }
+        // My Bookmarks tab
+        composeRule.onAllNodesWithText("My Bookmarks").onFirst().performClick()
+        settle(1_500L)
+        saveScreenshot("04-tv-bookmarks")
 
-    @Test
-    fun openTvCustomKeyboardSearchScreen() {
-        composeRule.waitUntil(timeoutMillis = 15_000L) {
-            composeRule.onAllNodesWithText("Search").fetchSemanticsNodes().isNotEmpty()
-        }
+        // Search with custom TV keyboard
         composeRule.onAllNodesWithText("Search").onFirst().performClick()
-
-        composeRule.waitUntil(timeoutMillis = 10_000L) {
-            composeRule.onAllNodesWithText("Q").fetchSemanticsNodes().isNotEmpty()
+        waitForText("Q", timeoutMs = 10_000L)
+        for (key in listOf("F", "R", "I", "E")) {
+            composeRule.onAllNodesWithText(key).onFirst().performClick()
         }
-        composeRule.onAllNodesWithText("Q").onFirst().assertIsDisplayed()
-        composeRule.onAllNodesWithText("Q").onFirst().performClick()
+        settle(2_500L)
+        saveScreenshot("05-tv-search-keyboard")
+
+        // Return from Search to Schedule
+        pressSystemBack()
+        waitForText("Search", timeoutMs = 10_000L)
+        composeRule.onAllNodesWithText("Schedule").onFirst().performClick()
+        settle(1_000L)
+
+        // Settings & Themes (default OLED Dark)
+        composeRule.onNodeWithContentDescription("Settings & Themes").performClick()
+        waitForText("Settings & Themes", timeoutMs = 10_000L)
+        composeRule.onNodeWithText("Settings & Themes").assertIsDisplayed()
+        settle(1_200L)
+        saveScreenshot("06-tv-settings-dark")
+
+        // Switch theme to Midnight Indigo
+        composeRule.onNodeWithText("Midnight Indigo").performClick()
+        settle(1_200L)
+        saveScreenshot("07-tv-settings-indigo")
+
+        // Return to Home in Midnight Indigo
+        composeRule.onNodeWithContentDescription("Back").performClick()
+        waitForText("Search", timeoutMs = 10_000L)
+        settle(1_500L)
+        saveScreenshot("08-tv-home-indigo")
+    }
+
+    private fun waitForText(text: String, timeoutMs: Long) {
+        composeRule.waitUntil(timeoutMillis = timeoutMs) {
+            composeRule.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    private fun pressSystemBack() {
+        composeRule.activityRule.scenario.onActivity { activity ->
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+    }
+
+    private fun settle(ms: Long) {
+        composeRule.waitForIdle()
+        Thread.sleep(ms)
+        composeRule.waitForIdle()
+    }
+
+    private fun saveScreenshot(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val dir = File(instrumentation.targetContext.getExternalFilesDir(null), "ci-screenshots")
+        if (!dir.exists()) dir.mkdirs()
+        val outFile = File(dir, "$name.png")
+        val bitmap = instrumentation.uiAutomation.takeScreenshot()
+        assertTrue("Failed to capture screenshot for $name", bitmap != null)
+        FileOutputStream(outFile).use { fos ->
+            bitmap!!.compress(Bitmap.CompressFormat.PNG, 100, fos)
+        }
+        bitmap?.recycle()
+        assertTrue("Screenshot file missing or empty: ${outFile.absolutePath}", outFile.length() > 0L)
     }
 }
