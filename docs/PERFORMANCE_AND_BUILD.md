@@ -84,7 +84,7 @@ All unit tests run fast on the JVM (`testOptions.unitTests.isReturnDefaultValues
 When extending the app, double-check these rules:
 
 - **Do NOT add `material-icons-extended`** — extract only needed icon paths into `AhIcons.kt`.
-- **Do NOT enable OkHttp's disk cache on Coil's `OkHttpClient`** — keep `okHttpClient.newBuilder().cache(null).build()` in `AppContainer` so Coil never double-writes images to `http_cache` and `image_cache`.
+- Keep OkHttp disk caching disabled: Room owns page caching, and Coil owns `image_cache`.
 - **Keep `ImageTargetSize` synced** — any change to a card/banner decode size in a screen or `AnimeCards.kt` must use the matching `ImageTargetSize` constant used by `AnimePreloader`.
 - **Do NOT add broad ProGuard keeps** for `androidx.media3.**`, `org.jsoup.**`, or `me.animeheaven.tv.data.**` — check release APK size after any ProGuard change.
 - **Keep `ViewModel` flows scoped** with `SharingStarted.WhileSubscribed(5_000L)` and `AnimePreloader` signature checks intact so background screens never trigger preload storms during fullscreen playback.

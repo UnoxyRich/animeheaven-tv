@@ -21,14 +21,15 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import me.animeheaven.tv.data.network.AnimeHeavenClient
-import me.animeheaven.tv.data.network.awaitResponse
+import me.animeheaven.tv.data.network.readResponse
+import me.animeheaven.tv.data.runCatchingCancellable
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -69,6 +70,8 @@ class StreamingChunkBooster(
 
     @Volatile
     private var currentPlayheadMs: Long = 0L
+    @Volatile
+    private var currentBufferedMs: Long = 0L
 
     @Volatile
     private var currentDurationMs: Long = 0L
@@ -142,7 +145,7 @@ class StreamingChunkBooster(
                             val len = minOf(CHUNK_SIZE_BYTES, totalLength - start)
                             if (len <= 0L || isChunkCached(cacheKey, start, len)) continue
                             val mirror = rankedMirrors[workerIdx % rankedMirrors.size]
-                            val bytesRead = runCatching {
+                            val bytesRead = runCatchingCancellable {
                                 fetchAndCommitChunk(
                                     cacheKey = cacheKey,
                                     mirrorUrl = mirror,
@@ -196,6 +199,7 @@ class StreamingChunkBooster(
         )
         activeSession = session
         currentPlayheadMs = initialPositionMs.coerceAtLeast(0L)
+        currentBufferedMs = currentPlayheadMs
         currentDurationMs = initialDurationMs.coerceAtLeast(0L)
         currentOpEndMs = opEndMs.coerceAtLeast(0L)
         lastSeekEventAtMs = System.currentTimeMillis()
@@ -229,9 +233,8 @@ class StreamingChunkBooster(
                                         buffer = buffer
                                     )
                                 } catch (ce: CancellationException) {
-                                    releaseChunk(session, nextStart)
                                     throw ce
-                                } catch (_: Throwable) {
+                                } catch (_: IOException) {
                                     -1
                                 } finally {
                                     releaseChunk(session, nextStart)
@@ -254,10 +257,11 @@ class StreamingChunkBooster(
         }
     }
 
-    fun updatePlayhead(positionMs: Long, durationMs: Long, opEndMs: Long) {
+    fun updatePlayhead(positionMs: Long, durationMs: Long, opEndMs: Long, bufferedMs: Long = positionMs) {
         val clamped = positionMs.coerceAtLeast(0L)
         val prev = currentPlayheadMs
         currentPlayheadMs = clamped
+        currentBufferedMs = bufferedMs.coerceAtLeast(clamped)
         if (durationMs > 0L) currentDurationMs = durationMs
         if (opEndMs > 0L) currentOpEndMs = opEndMs
         if (abs(clamped - prev) > SEEK_JUMP_THRESHOLD_MS) {
@@ -269,8 +273,8 @@ class StreamingChunkBooster(
     fun stopStreamingBoost() {
         val prev = activeSession
         activeSession = null
-        prev?.wakeup?.close()
         streamingJob?.cancel()
+        prev?.wakeup?.trySend(Unit)
         streamingJob = null
     }
 
@@ -295,7 +299,7 @@ class StreamingChunkBooster(
             val durMs = currentDurationMs
             val opEnd = currentOpEndMs
 
-            val estByte = estimateByteOffset(playheadMs, durMs, session.totalLength)
+            val estByte = estimateByteOffset(maxOf(playheadMs, currentBufferedMs), durMs, session.totalLength)
             val recentlySeeked = (System.currentTimeMillis() - lastSeekEventAtMs) < RECENT_SEEK_WINDOW_MS
             val aheadChunks = if (recentlySeeked) 1L else 2L
             val aheadAnchor = alignChunkStart((estByte + aheadChunks * CHUNK_SIZE_BYTES).coerceAtLeast(0L))
@@ -360,40 +364,35 @@ class StreamingChunkBooster(
             .header("User-Agent", AnimeHeavenClient.USER_AGENT)
             .header("Referer", "${AnimeHeavenClient.BASE_URL}/")
             .header("Range", "bytes=$chunkStart-$rangeEnd")
+            .header("Accept-Encoding", "identity")
             .build()
 
         val expectedLen = chunkLen.toInt()
         val startNs = System.nanoTime()
-        var totalRead = 0
-        try {
-            val response = videoHttpClient.awaitResponse(req)
-            withContext(Dispatchers.IO) {
-                response.use { resp ->
-                    if (!resp.isSuccessful && resp.code != 206) {
-                        throw IOException("HTTP ${resp.code} for range $chunkStart-$rangeEnd")
-                    }
-                    val stream = resp.body?.byteStream() ?: throw IOException("Empty chunk body")
-                    val ctx = currentCoroutineContext()
-                    while (totalRead < expectedLen) {
-                        if (!ctx.isActive) throw CancellationException("Chunk booster cancelled")
-                        val n = stream.read(buffer, totalRead, expectedLen - totalRead)
-                        if (n <= 0) break
-                        totalRead += n
-                    }
+        // Keep the worker's reusable buffer out of the callback: when a cancelled caller
+        // returns it to the pool, the socket reader may still be unwinding.
+        val bytes = try {
+            videoHttpClient.readResponse(req) { resp ->
+                if (!isValidChunkResponse(
+                        resp.code, resp.header("Content-Range"), resp.header("Content-Type"),
+                        resp.header("Content-Encoding"), chunkStart, rangeEnd
+                    )
+                ) {
+                    throw IOException("Invalid HTTP ${resp.code} response for range $chunkStart-$rangeEnd")
                 }
+                val source = resp.body?.source() ?: throw IOException("Empty chunk body")
+                source.readByteArray(expectedLen.toLong())
             }
         } catch (ce: CancellationException) {
             throw ce
-        } catch (err: Throwable) {
+        } catch (err: IOException) {
             mirrorHealthTracker?.recordFailure(mirrorUrl)
             throw err
         }
 
-        if (totalRead <= 0) return -1
-        if (totalRead < expectedLen) {
-            mirrorHealthTracker?.recordFailure(mirrorUrl)
-            throw IOException("Incomplete chunk read: $totalRead/$expectedLen bytes")
-        }
+        currentCoroutineContext().ensureActive()
+        val totalRead = bytes.size
+        bytes.copyInto(buffer)
 
         val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
         mirrorHealthTracker?.recordChunkThroughput(mirrorUrl, totalRead.toLong(), elapsedMs)
@@ -419,6 +418,22 @@ class StreamingChunkBooster(
     }
 
     companion object {
+        private val CONTENT_RANGE = Regex("""bytes (\d+)-(\d+)/(\d+)""", RegexOption.IGNORE_CASE)
+
+        internal fun isValidChunkResponse(
+            code: Int, range: String?, type: String?, encoding: String?, start: Long, end: Long
+        ): Boolean {
+            val mime = type.orEmpty().substringBefore(';').trim().lowercase()
+            if (mime.startsWith("text/") || "html" in mime || "json" in mime ||
+                (encoding != null && !encoding.equals("identity", ignoreCase = true))
+            ) return false
+            if (code == 200) return start == 0L && range == null
+            if (code != 206) return false
+            val fields = range?.let(CONTENT_RANGE::matchEntire)?.groupValues ?: return false
+            return fields[1].toLongOrNull() == start && fields[2].toLongOrNull() == end &&
+                (fields[3].toLongOrNull() ?: 0L) > end
+        }
+
         const val CHUNK_SIZE_BYTES = 512L * 1024L
         private const val SLIDING_AHEAD_WINDOW_BYTES = 36L * 1024L * 1024L
         private const val MAX_PRELOAD_WORKERS = 4

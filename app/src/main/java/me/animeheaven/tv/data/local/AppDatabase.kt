@@ -94,23 +94,11 @@ interface WatchProgressDao {
     @Query("SELECT * FROM watch_progress ORDER BY updatedAt DESC")
     fun observeAll(): Flow<List<WatchProgressEntity>>
 
-    @Query(
-        """
-        SELECT wp.* FROM watch_progress wp
-        INNER JOIN (
-            SELECT animeId, MAX(updatedAt) AS maxUpdated
-            FROM watch_progress
-            WHERE animeId != ''
-            GROUP BY animeId
-        ) latest ON wp.animeId = latest.animeId AND wp.updatedAt = latest.maxUpdated
-        ORDER BY wp.updatedAt DESC
-        LIMIT 30
-        """
-    )
-    fun observeLatestPerAnime(): Flow<List<WatchProgressEntity>>
+    @Query(CONTINUE_WATCHING_QUERY)
+    fun observeLatestPerAnime(minResumeMs: Long): Flow<List<WatchProgressEntity>>
 
-    @Query("SELECT * FROM watch_progress ORDER BY updatedAt DESC LIMIT 50")
-    suspend fun getAllOnce(): List<WatchProgressEntity>
+    @Query(CONTINUE_WATCHING_QUERY)
+    suspend fun getLatestPerAnimeOnce(minResumeMs: Long): List<WatchProgressEntity>
 
     @Query("SELECT * FROM watch_progress WHERE animeId = :animeId ORDER BY updatedAt DESC")
     fun observeByAnime(animeId: String): Flow<List<WatchProgressEntity>>
@@ -124,6 +112,20 @@ interface WatchProgressDao {
     @Query("DELETE FROM watch_progress")
     suspend fun clearAll()
 }
+
+private const val CONTINUE_WATCHING_QUERY = """
+    SELECT wp.* FROM watch_progress wp
+    WHERE wp.animeId != ''
+      AND wp.episodeKey = (
+          SELECT latest.episodeKey FROM watch_progress latest
+          WHERE latest.animeId = wp.animeId
+          ORDER BY latest.updatedAt DESC, latest.episodeKey DESC LIMIT 1
+      )
+      AND ((wp.isWatched = 0 AND wp.positionMs > :minResumeMs)
+           OR (wp.isWatched = 1 AND length(trim(wp.nextEpisodeKey)) > 0))
+    ORDER BY wp.updatedAt DESC, wp.episodeKey DESC
+    LIMIT 30
+"""
 
 @Dao
 interface SearchHistoryDao {
@@ -181,7 +183,7 @@ interface WebCacheDao {
         WebCacheEntity::class
     ],
     version = 3,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun bookmarkDao(): BookmarkDao
@@ -230,9 +232,9 @@ abstract class AppDatabase : RoomDatabase() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     super.onOpen(db)
                     // Safe with WAL mode: avoids per-transaction fsync stalls on TV eMMC flash
-                    db.query("PRAGMA synchronous = NORMAL").close()
-                    db.query("PRAGMA temp_store = MEMORY").close()
-                    db.query("PRAGMA cache_size = -4000").close()
+                    db.execSQL("PRAGMA synchronous = NORMAL")
+                    db.execSQL("PRAGMA temp_store = MEMORY")
+                    db.execSQL("PRAGMA cache_size = -4000")
                 }
             })
             .build()

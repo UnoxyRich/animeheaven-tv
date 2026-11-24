@@ -73,9 +73,8 @@ fun CatalogScreen(
                 if (viewModel.kind == CatalogKind.SEASONAL) {
                     viewModel.load(true)
                 } else {
-                    val path = state.seasonPath ?: "2025fall.php"
                     val label = state.seasonLabel ?: "Season"
-                    onOpenSeasonal(path, label)
+                    state.seasonPath?.takeIf { it.isNotBlank() }?.let { onOpenSeasonal(it, label) }
                 }
             },
             onSelectRandom = onOpenRandom,
@@ -139,7 +138,7 @@ fun CatalogScreen(
                     } else if (state.viewMode == FeedViewMode.LIST) {
                         itemsIndexed(
                             items = state.items,
-                            key = { _, it -> it.id },
+                            key = { index, it -> "anime_${index}_${it.id}" },
                             contentType = { _, _ -> "catalog_list_card" }
                         ) { index, card ->
                             ScheduleListCard(

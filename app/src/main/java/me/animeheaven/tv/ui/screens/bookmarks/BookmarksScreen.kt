@@ -74,9 +74,8 @@ fun BookmarksScreen(
             onSelectBookmarks = {},
             onSelectPopular = onOpenPopular,
             onSelectSeasonal = {
-                val path = state.seasonPath ?: "2025fall.php"
                 val label = state.seasonLabel ?: "Season"
-                onOpenSeasonal(path, label)
+                state.seasonPath?.takeIf { it.isNotBlank() }?.let { onOpenSeasonal(it, label) }
             },
             onSelectRandom = onOpenRandom,
             onSelectSettings = onOpenSettings

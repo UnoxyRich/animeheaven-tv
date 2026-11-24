@@ -17,6 +17,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -144,6 +146,7 @@ fun TvCustomKeyboard(
             KeyCap(
                 label = "⌫",
                 onClick = onBackspace,
+                accessibilityLabel = "Backspace",
                 modifier = Modifier
                     .weight(1.4f)
                     .height(44.dp)
@@ -193,12 +196,15 @@ private fun KeyCap(
     label: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    isPrimary: Boolean = false
+    isPrimary: Boolean = false,
+    accessibilityLabel: String? = null
 ) {
     val palette = LocalAhPalette.current
     AhFocusableBox(
         onClick = onClick,
-        modifier = modifier,
+        modifier = if (accessibilityLabel == null) modifier else modifier.semantics(mergeDescendants = true) {
+            contentDescription = accessibilityLabel
+        },
         shape = AhShape3,
         containerColor = if (isPrimary) Color.White else palette.surfaceElevated,
         focusedContainerColor = if (isPrimary) palette.crimson else Color.White,

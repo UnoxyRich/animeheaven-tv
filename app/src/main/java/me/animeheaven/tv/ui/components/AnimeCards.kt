@@ -4,6 +4,7 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
@@ -180,6 +182,8 @@ fun HeroBannerCarousel(
     Box(
         modifier = modifier
             .fillMaxWidth()
+            .onFocusChanged { isCarouselFocused = it.hasFocus }
+            .focusGroup()
             .padding(horizontal = AhOverscanHorizontal)
             .height(266.dp)
             .clip(AhShape12)
@@ -311,7 +315,6 @@ fun HeroBannerCarousel(
                     focusedBorderWidth = 3.dp,
                     focusScale = 1.06f,
                     onFocusStateChanged = { focused ->
-                        isCarouselFocused = focused
                         if (focused) onBannerFocused?.invoke(current.animeId, current.bannerImageUrl)
                     }
                 ) { _ ->
@@ -345,7 +348,6 @@ fun HeroBannerCarousel(
                     focusedBorderWidth = 2.5.dp,
                     focusScale = 1.05f,
                     onFocusStateChanged = { focused ->
-                        isCarouselFocused = focused
                         if (focused) onBannerFocused?.invoke(current.animeId, current.bannerImageUrl)
                     }
                 ) { _ ->
@@ -369,7 +371,7 @@ fun HeroBannerCarousel(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                AhStaticFocusableBox(
+                AhFocusableBox(
                     onClick = {
                         currentIndex = if (safeIndex == 0) banners.lastIndex else safeIndex - 1
                     },
@@ -379,14 +381,13 @@ fun HeroBannerCarousel(
                     focusedContainerColor = Color.White,
                     unfocusedBorderColor = Color(0x44FFFFFF),
                     focusedBorderColor = Color.White,
-                    focusScale = 1.1f,
-                    onFocusStateChanged = { isCarouselFocused = it }
-                ) {
+                    focusScale = 1.1f
+                ) { isFocused ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
                             contentDescription = "Previous Banner",
-                            tint = Color.White,
+                            tint = if (isFocused) Color.Black else Color.White,
                             modifier = Modifier.size(22.dp)
                         )
                     }
@@ -406,7 +407,7 @@ fun HeroBannerCarousel(
                     }
                 }
 
-                AhStaticFocusableBox(
+                AhFocusableBox(
                     onClick = { currentIndex = (safeIndex + 1) % banners.size },
                     modifier = Modifier.size(34.dp),
                     shape = CircleShape,
@@ -414,14 +415,13 @@ fun HeroBannerCarousel(
                     focusedContainerColor = Color.White,
                     unfocusedBorderColor = Color(0x44FFFFFF),
                     focusedBorderColor = Color.White,
-                    focusScale = 1.1f,
-                    onFocusStateChanged = { isCarouselFocused = it }
-                ) {
+                    focusScale = 1.1f
+                ) { isFocused ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                             contentDescription = "Next Banner",
-                            tint = Color.White,
+                            tint = if (isFocused) Color.Black else Color.White,
                             modifier = Modifier.size(22.dp)
                         )
                     }
@@ -690,7 +690,7 @@ fun PopularHorizontalStrip(
         ) {
             itemsIndexed(
                 items = items,
-                key = { _, it -> it.id },
+                key = { index, it -> "anime_${index}_${it.id}" },
                 contentType = { _, _ -> "popular_card" }
             ) { index, anime ->
                 val rank = index + 1
@@ -1293,7 +1293,8 @@ fun AhLoadingBox(
 fun AhErrorBox(
     errorMessage: String,
     onRetry: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    retryModifier: Modifier = Modifier
 ) {
     val palette = LocalAhPalette.current
     Box(
@@ -1323,6 +1324,7 @@ fun AhErrorBox(
             )
             Spacer(modifier = Modifier.height(18.dp))
             AhFocusableBox(
+                modifier = retryModifier,
                 onClick = onRetry,
                 shape = AhShape3,
                 containerColor = Color.White,

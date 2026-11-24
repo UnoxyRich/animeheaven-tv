@@ -10,7 +10,7 @@ This document covers the networking, HTML parsing, multi-tier caching, predictiv
 - Base URL: `https://animeheaven.me`
 - Dispatcher limits: `maxRequests = 32`, `maxRequestsPerHost = 12`
 - ConnectionPool: `12` idle connections, `5 min` keep-alive
-- HTTP Disk Cache: `24 MB` under `cacheDir/http_cache` (used for HTML/API requests; explicitly stripped for Coil via `okHttpClient.newBuilder().cache(null).build()` so artwork is never written to two separate disk caches)
+- HTML/API caching is owned by Room and bounded in-memory caches; OkHttp has no on-disk HTTP cache. Coil owns its image cache separately.
 - Cancellable calls via `OkHttpClient.awaitResponse(request)` using `suspendCancellableCoroutine` + `cont.invokeOnCancellation { call.cancel() }`, aborting sockets immediately when search typing or screen navigation cancels a job.
 - [`CachedDns`](../app/src/main/java/me/animeheaven/tv/data/network/NetworkOptimizer.kt): 5-minute in-memory DNS TTL cache with stale IP fallback on `UnknownHostException`.
 
@@ -106,7 +106,7 @@ Mirrors for the same episode are frequently CDN aliases or tokenized URLs for th
 
 Result:
 - Switching mirrors mid-playback or failover recovers cached byte spans at **0 ms**.
-- `SimpleCache` eviction budget scales by free storage: `1 GB` if usable disk >= `4 GB`, otherwise `512 MB` (`CacheDataSink` fragment size `2 MB`, chunk unit `512 KB`).
+- `SimpleCache` uses at most one quarter of usable storage, targeting `512 MB` below `4 GB` free and `1 GB` otherwise (`CacheDataSink` fragment size `2 MB`, chunk unit `512 KB`).
 - Current-episode preloads survive `PlayerScreen` startup via `videoCacheManager.cancelPreloadsExcept(episodeKey)`.
 
 ### First-Valid-Mirror Probe & `MirrorHealthTracker`

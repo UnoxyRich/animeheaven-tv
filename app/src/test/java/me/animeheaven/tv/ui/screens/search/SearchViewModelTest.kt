@@ -108,4 +108,19 @@ class SearchViewModelTest {
         assertTrue(vm.uiState.value.fastResults.isEmpty())
         assertTrue(vm.uiState.value.fullResults.isEmpty())
     }
+
+    @Test
+    fun `full submission and recent selection invalidate pending typing`() = runTest {
+        val gateway = FakeSearchGateway()
+        val vm = SearchViewModel(gateway = gateway, debounceMillis = 250L)
+        vm.appendChar("clover")
+        advanceTimeBy(125)
+        vm.submitFullSearch()
+        advanceUntilIdle()
+        vm.applyRecentQuery("dandadan")
+        advanceUntilIdle()
+        assertEquals(emptyList<String>(), gateway.fastQueries)
+        assertEquals(listOf("clover", "dandadan"), gateway.fullQueries)
+        assertTrue(vm.uiState.value.isFullSearchMode)
+    }
 }

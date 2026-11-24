@@ -9,6 +9,7 @@ import me.animeheaven.tv.data.model.FastSearchItem
 import me.animeheaven.tv.data.model.HomeFeed
 import me.animeheaven.tv.data.model.RankDirection
 import me.animeheaven.tv.data.network.AnimeHeavenClient
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.jsoup.select.Evaluator
@@ -18,7 +19,9 @@ object AnimeHeavenParser {
 
     private val ANIME_ID_REGEX = Regex("""anime\.php\?([a-zA-Z0-9_-]+)""")
     private val GATE_KEY_REGEX = Regex("""gate(?:a|h)?\s*\(\s*["']([a-zA-Z0-9_-]+)["']""")
-    private val EPISODE_NUMBER_REGEX = Regex("""(\d+(?:\.\d+)?)""")
+    private val EXPLICIT_EPISODE_NUMBER = Regex("""(?:^|[^a-z])(?:episode|ep\.?|e)\s*(\d+(?:\.\d+)?)""", RegexOption.IGNORE_CASE)
+    private val LEADING_EPISODE_NUMBER = Regex("""^\s*(\d+(?:\.\d+)?)""")
+    private val SITE = AnimeHeavenClient.BASE_URL.toHttpUrl()
 
     // Pre-compiled Jsoup Evaluators eliminate ~450 CSS selector parses per page
     private val EVAL_BANNER_LINKS: Evaluator = QueryParser.parse("div.banner #slide a[href*=anime.php]")
@@ -70,12 +73,13 @@ object AnimeHeavenParser {
     fun normalizeUrl(url: String?): String {
         val trimmed = url?.trim().orEmpty()
         if (trimmed.isEmpty()) return ""
-        return when {
-            trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
-            trimmed.startsWith("//") -> "https:$trimmed"
-            trimmed.startsWith("/") -> "${AnimeHeavenClient.BASE_URL}$trimmed"
-            else -> "${AnimeHeavenClient.BASE_URL}/$trimmed"
+        val resolved = SITE.resolve(trimmed) ?: return ""
+        if (resolved.username.isNotEmpty() || resolved.password.isNotEmpty()) return ""
+        if (resolved.scheme == "https") return resolved.toString()
+        if (resolved.host == SITE.host && resolved.port == 80) {
+            return resolved.newBuilder().scheme("https").port(443).build().toString()
         }
+        return ""
     }
 
     fun parseHome(html: String): HomeFeed {
@@ -262,7 +266,7 @@ object AnimeHeavenParser {
             val key = epLink.attr("id").trim().ifBlank {
                 GATE_KEY_REGEX.find(epLink.attr("onclick"))?.groupValues?.getOrNull(1).orEmpty()
             }
-            if (key.isBlank()) return@mapNotNull null
+            if (!AnimeHeavenClient.EPISODE_KEY.matches(key)) return@mapNotNull null
 
             val numberLabel = epLink.selectFirst(EVAL_WATCH2)?.text()?.trim().orEmpty()
             val watch1s = epLink.select(EVAL_WATCH1)
@@ -332,7 +336,7 @@ object AnimeHeavenParser {
 
         val navLinks = doc.select(EVAL_GATE_LINKS).mapNotNull { link ->
             val key = GATE_KEY_REGEX.find(link.attr("onclick"))?.groupValues?.getOrNull(1)
-                ?: link.attr("id").trim().takeIf { it.isNotBlank() }
+                ?: link.attr("id").trim().takeIf(AnimeHeavenClient.EPISODE_KEY::matches)
                 ?: return@mapNotNull null
             val label = link.selectFirst(EVAL_BOX_ITEM)?.text()?.trim().orEmpty()
                 .ifBlank { link.text().trim() }
@@ -390,5 +394,6 @@ object AnimeHeavenParser {
     }
 
     private fun extractLeadingNumber(text: String): Double? =
-        EPISODE_NUMBER_REGEX.find(text)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+        (EXPLICIT_EPISODE_NUMBER.find(text) ?: LEADING_EPISODE_NUMBER.find(text))
+            ?.groupValues?.getOrNull(1)?.toDoubleOrNull()
 }

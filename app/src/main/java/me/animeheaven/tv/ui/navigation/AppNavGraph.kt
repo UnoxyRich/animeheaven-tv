@@ -1,6 +1,7 @@
 package me.animeheaven.tv.ui.navigation
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -15,6 +16,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -25,6 +29,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import kotlinx.coroutines.launch
 import me.animeheaven.tv.AppContainer
+import me.animeheaven.tv.data.runCatchingCancellable
 import me.animeheaven.tv.ui.components.AhLoadingBox
 import me.animeheaven.tv.ui.screens.bookmarks.BookmarksScreen
 import me.animeheaven.tv.ui.screens.bookmarks.BookmarksViewModel
@@ -74,6 +79,7 @@ private object Routes {
 fun AppNavGraph(container: AppContainer) {
     val navController = rememberNavController()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var resolvingRandom by remember { mutableStateOf(false) }
 
     val navigateTopTab: (String) -> Unit = remember(navController) {
@@ -86,26 +92,29 @@ fun AppNavGraph(container: AppContainer) {
         }
     }
 
-    val openRandomAnime: () -> Unit = remember(navController, container) {
+    val openRandomAnime: () -> Unit = remember(navController, container, context) {
         {
             if (!resolvingRandom) {
                 resolvingRandom = true
                 scope.launch {
-                    runCatching { container.repository.getRandomAnimeId() }
-                        .onSuccess { randomId ->
-                            resolvingRandom = false
-                            navController.navigate(Routes.detail(randomId))
+                    try {
+                        runCatchingCancellable {
+                            val id = container.repository.getRandomAnimeId()
+                            check(id.isNotBlank())
+                            navController.navigate(Routes.detail(id))
+                        }.onFailure {
+                            Toast.makeText(context, "Couldn’t pick a random anime. Try again.", Toast.LENGTH_SHORT).show()
                         }
-                        .onFailure {
-                            resolvingRandom = false
-                        }
+                    } finally {
+                        resolvingRandom = false
+                    }
                 }
             }
         }
     }
 
     val openAnime: (String) -> Unit = remember(navController) {
-        { id -> navController.navigate(Routes.detail(id)) }
+        { id -> if (id.isNotBlank()) navController.navigate(Routes.detail(id)) }
     }
     val openHome: () -> Unit = remember(navigateTopTab) { { navigateTopTab(Routes.HOME) } }
     val openSearch: () -> Unit = remember(navController) { { navController.navigate(Routes.SEARCH) } }
@@ -113,7 +122,7 @@ fun AppNavGraph(container: AppContainer) {
     val openBookmarks: () -> Unit = remember(navigateTopTab) { { navigateTopTab(Routes.BOOKMARKS) } }
     val openPopular: () -> Unit = remember(navigateTopTab) { { navigateTopTab(Routes.POPULAR) } }
     val openSeasonal: (String, String) -> Unit = remember(navigateTopTab) {
-        { path, label -> navigateTopTab(Routes.seasonal(path, label)) }
+        { path, label -> if (path.isNotBlank()) navigateTopTab(Routes.seasonal(path, label.ifBlank { "Season" })) }
     }
     val openSettings: () -> Unit = remember(navController) { { navController.navigate(Routes.SETTINGS) } }
     val popBack: () -> Unit = remember(navController) { { navController.popBackStack() } }
@@ -141,6 +150,7 @@ fun AppNavGraph(container: AppContainer) {
                     viewModel = vm,
                     onOpenAnime = openAnime,
                     onPlayContinueItem = { cw ->
+                        if (cw.targetEpisodeKey.isNotBlank())
                         navController.navigate(
                             Routes.player(
                                 episodeKey = cw.targetEpisodeKey,
@@ -221,8 +231,8 @@ fun AppNavGraph(container: AppContainer) {
                     navArgument("label") { type = NavType.StringType }
                 )
             ) { entry ->
-                val path = Uri.decode(entry.arguments?.getString("path").orEmpty())
-                val label = Uri.decode(entry.arguments?.getString("label").orEmpty())
+                val path = entry.arguments?.getString("path").orEmpty()
+                val label = entry.arguments?.getString("label").orEmpty()
                 val vm: CatalogViewModel = viewModel(
                     factory = simpleFactory {
                         CatalogViewModel(
@@ -253,7 +263,7 @@ fun AppNavGraph(container: AppContainer) {
                 route = Routes.TAG,
                 arguments = listOf(navArgument("tag") { type = NavType.StringType })
             ) { entry ->
-                val tag = Uri.decode(entry.arguments?.getString("tag").orEmpty())
+                val tag = entry.arguments?.getString("tag").orEmpty()
                 val vm: CatalogViewModel = viewModel(
                     factory = simpleFactory {
                         CatalogViewModel(
@@ -290,6 +300,7 @@ fun AppNavGraph(container: AppContainer) {
                     viewModel = vm,
                     onOpenAnime = openAnime,
                     onPlayContinueItem = { cw ->
+                        if (cw.targetEpisodeKey.isNotBlank())
                         navController.navigate(
                             Routes.player(
                                 episodeKey = cw.targetEpisodeKey,
@@ -330,7 +341,7 @@ fun AppNavGraph(container: AppContainer) {
                 route = Routes.DETAIL,
                 arguments = listOf(navArgument("animeId") { type = NavType.StringType })
             ) { entry ->
-                val animeId = Uri.decode(entry.arguments?.getString("animeId").orEmpty())
+                val animeId = entry.arguments?.getString("animeId").orEmpty()
                 val vm: DetailViewModel = viewModel(
                     factory = simpleFactory {
                         DetailViewModel(container.repository, animeId, container.preloader)
@@ -340,9 +351,9 @@ fun AppNavGraph(container: AppContainer) {
                     viewModel = vm,
                     onBack = popBack,
                     onPlayEpisode = { key, id, title, cover ->
-                        navController.navigate(Routes.player(key, id, title, cover))
+                        if (key.isNotBlank()) navController.navigate(Routes.player(key, id, title, cover))
                     },
-                    onOpenTag = { tag -> navController.navigate(Routes.tag(tag)) },
+                    onOpenTag = { tag -> if (tag.isNotBlank()) navController.navigate(Routes.tag(tag)) },
                     onOpenAnime = openAnime
                 )
             }
@@ -356,11 +367,11 @@ fun AppNavGraph(container: AppContainer) {
                     navArgument("coverUrl") { type = NavType.StringType }
                 )
             ) { entry ->
-                val epKey = Uri.decode(entry.arguments?.getString("episodeKey").orEmpty())
-                val animeId = Uri.decode(entry.arguments?.getString("animeId").orEmpty())
+                val epKey = entry.arguments?.getString("episodeKey").orEmpty()
+                val animeId = entry.arguments?.getString("animeId").orEmpty()
                     .let { if (it == "_") "" else it }
-                val animeTitle = Uri.decode(entry.arguments?.getString("animeTitle").orEmpty())
-                val coverUrl = Uri.decode(entry.arguments?.getString("coverUrl").orEmpty())
+                val animeTitle = entry.arguments?.getString("animeTitle").orEmpty()
+                val coverUrl = entry.arguments?.getString("coverUrl").orEmpty()
                     .let { if (it == "_") "" else it }
 
                 val vm: PlayerViewModel = viewModel(
@@ -373,6 +384,7 @@ fun AppNavGraph(container: AppContainer) {
                             initialAnimeId = animeId,
                             initialAnimeTitle = animeTitle,
                             initialCoverUrl = coverUrl,
+                            progressScope = container.appScope,
                             videoCacheManager = container.videoCacheManager,
                             preloader = container.preloader
                         )
@@ -397,12 +409,14 @@ fun AppNavGraph(container: AppContainer) {
         }
 
         if (resolvingRandom) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xAA000000))
+            Dialog(
+                onDismissRequest = {},
+                properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false,
+                    usePlatformDefaultWidth = false)
             ) {
-                AhLoadingBox(message = "Picking a random anime...")
+                Box(Modifier.fillMaxSize().background(Color(0xAA000000))) {
+                    AhLoadingBox(message = "Picking a random anime...")
+                }
             }
         }
     }

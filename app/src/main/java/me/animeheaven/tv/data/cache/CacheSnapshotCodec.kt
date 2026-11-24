@@ -22,6 +22,8 @@ import me.animeheaven.tv.data.model.RankDirection
 object CacheSnapshotCodec {
 
     private const val GZ_PREFIX = "GZ:"
+    private const val MAX_HTML_BYTES = 16 * 1024 * 1024
+    private val JSON_NUMBER = Regex("""-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?""")
 
     fun compressText(raw: String): String {
         if (raw.length < 512) return raw
@@ -34,14 +36,23 @@ object CacheSnapshotCodec {
         }.getOrDefault(raw)
     }
 
-    fun decompressText(stored: String): String {
+    fun decompressText(stored: String): String? {
         if (!stored.startsWith(GZ_PREFIX)) return stored
+        if (stored.length > MAX_HTML_BYTES * 2) return null
         return runCatching {
             val bytes = decodeBase64(stored.substring(GZ_PREFIX.length))
             GZIPInputStream(ByteArrayInputStream(bytes)).use { gz ->
-                gz.readBytes().toString(StandardCharsets.UTF_8)
+                val output = ByteArrayOutputStream()
+                val buffer = ByteArray(8 * 1024)
+                while (true) {
+                    val count = gz.read(buffer)
+                    if (count < 0) break
+                    if (output.size() + count > MAX_HTML_BYTES) return null
+                    output.write(buffer, 0, count)
+                }
+                output.toString(StandardCharsets.UTF_8.name())
             }
-        }.getOrDefault(stored)
+        }.getOrNull()
     }
 
     fun encodeHomeFeed(feed: HomeFeed): String = buildString(4096) {
@@ -428,7 +439,7 @@ object CacheSnapshotCodec {
 
     /**
      * Single-pass pull reader that decodes directly into Kotlin models without building
-     * intermediate Map/List ASTs, and uses zero-copy substring slicing for unescaped strings.
+     * intermediate Map/List ASTs.
      */
     private class StreamingJsonReader(private val s: String) {
         private var pos = 0
@@ -536,6 +547,7 @@ object CacheSnapshotCodec {
                 if (c == '\\') {
                     return readEscapedString(start)
                 }
+                require(c >= ' ') { "Unescaped control character" }
                 pos++
             }
             throw IllegalArgumentException("Unterminated string")
@@ -559,24 +571,39 @@ object CacheSnapshotCodec {
                             't' -> sb.append('\t')
                             'u' -> {
                                 if (pos + 4 > len) throw IllegalArgumentException("Bad unicode")
-                                sb.append(s.substring(pos, pos + 4).toInt(16).toChar())
+                                var code = 0
+                                repeat(4) { index ->
+                                    val hex = s[pos + index]
+                                    val digit = when (hex) {
+                                        in '0'..'9' -> hex - '0'
+                                        in 'a'..'f' -> hex - 'a' + 10
+                                        in 'A'..'F' -> hex - 'A' + 10
+                                        else -> throw IllegalArgumentException("Bad Unicode escape")
+                                    }
+                                    code = (code shl 4) or digit
+                                }
+                                sb.append(code.toChar())
                                 pos += 4
                             }
                             else -> throw IllegalArgumentException("Bad escape \\$esc")
                         }
                     }
-                    else -> sb.append(c)
+                    else -> {
+                        require(c >= ' ') { "Unescaped control character" }
+                        sb.append(c)
+                    }
                 }
             }
             throw IllegalArgumentException("Unterminated string")
         }
 
-        fun skipValue() {
+        fun skipValue(depth: Int = 0) {
+            require(depth < 64) { "Excessively nested JSON" }
             skipWs()
             if (pos >= len) throw IllegalArgumentException("Unexpected EOF")
             when (val c = s[pos]) {
                 '"' -> readString()
-                '{' -> readObject { skipValue() }
+                '{' -> readObject { skipValue(depth + 1) }
                 '[' -> {
                     pos++
                     skipWs()
@@ -585,7 +612,7 @@ object CacheSnapshotCodec {
                         return
                     }
                     while (true) {
-                        skipValue()
+                        skipValue(depth + 1)
                         skipWs()
                         if (pos >= len) throw IllegalArgumentException("Unterminated array")
                         when (s[pos]) {
@@ -602,7 +629,9 @@ object CacheSnapshotCodec {
                 't' -> expect("true")
                 'f' -> expect("false")
                 '-', in '0'..'9' -> {
-                    while (pos < len && s[pos] in "-0123456789.eE+") pos++
+                    val match = JSON_NUMBER.matchAt(s, pos)
+                        ?: throw IllegalArgumentException("Invalid JSON number")
+                    pos = match.range.last + 1
                 }
                 else -> throw IllegalArgumentException("Unexpected char '$c' at $pos")
             }
@@ -639,20 +668,26 @@ object CacheSnapshotCodec {
 
     private fun decodeBase64(str: String): ByteArray {
         val cleanLen = str.length
-        if (cleanLen == 0) return ByteArray(0)
+        require(cleanLen > 0 && cleanLen % 4 == 0) { "Invalid Base64 length" }
         var pad = 0
         if (cleanLen >= 1 && str[cleanLen - 1] == '=') pad++
         if (cleanLen >= 2 && str[cleanLen - 2] == '=') pad++
-        val out = ByteArray((cleanLen * 3) / 4 - pad)
+        val out = ByteArray((cleanLen / 4) * 3 - pad)
+        fun digit(char: Char): Int = B64_REVERSE.getOrElse(char.code) { -1 }
+            .also { require(it >= 0) { "Invalid Base64 character" } }
         var outIdx = 0
         var i = 0
         while (i < cleanLen) {
-            val c0 = B64_REVERSE[str[i++].code]
-            val c1 = B64_REVERSE[str[i++].code]
+            val c0 = digit(str[i++])
+            val c1 = digit(str[i++])
             val c2c = str[i++]
             val c3c = str[i++]
-            val c2 = if (c2c == '=') 0 else B64_REVERSE[c2c.code]
-            val c3 = if (c3c == '=') 0 else B64_REVERSE[c3c.code]
+            val padded = i == cleanLen && pad > 0
+            val c2 = if (padded && pad == 2) 0 else digit(c2c)
+            val c3 = if (padded) 0 else digit(c3c)
+            require(!padded || if (pad == 2) c1 and 15 == 0 else c2 and 3 == 0) {
+                "Invalid Base64 padding bits"
+            }
             val triple = (c0 shl 18) or (c1 shl 12) or (c2 shl 6) or c3
             out[outIdx++] = ((triple shr 16) and 0xFF).toByte()
             if (c2c != '=' && outIdx < out.size) out[outIdx++] = ((triple shr 8) and 0xFF).toByte()

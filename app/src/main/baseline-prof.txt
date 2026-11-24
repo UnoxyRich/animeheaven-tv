@@ -12,7 +12,7 @@ HSPLme/animeheaven/tv/data/cache/LruCacheMap;->**(**)**
 HSPLme/animeheaven/tv/data/cache/AnimePreloader;->**(**)**
 HSPLme/animeheaven/tv/data/cache/VideoCacheManager;->**(**)**
 HSPLme/animeheaven/tv/data/cache/MirrorHealthTracker;->**(**)**
-HSPLme/animeheaven/tv/data/cache/StreamingChunkBooster;->**(**)**
+HPLme/animeheaven/tv/data/cache/StreamingChunkBooster;->**(**)**
 HSPLme/animeheaven/tv/data/parser/AnimeHeavenParser;->**(**)**
 HSPLme/animeheaven/tv/data/repository/AnimeHeavenRepository;->**(**)**
 HSPLme/animeheaven/tv/data/repository/RequestCoalescer;->**(**)**
@@ -29,19 +29,19 @@ HSPLme/animeheaven/tv/ui/components/AnimeCardsKt;->**(**)**
 HSPLme/animeheaven/tv/ui/components/AnimeHeavenHeaderKt;->**(**)**
 HSPLme/animeheaven/tv/ui/screens/home/HomeScreenKt;->**(**)**
 HSPLme/animeheaven/tv/ui/screens/home/HomeViewModel;->**(**)**
-HSPLme/animeheaven/tv/ui/screens/detail/AnimeDetailScreenKt;->**(**)**
-HSPLme/animeheaven/tv/ui/screens/player/PlayerScreenKt;->**(**)**
-HSPLme/animeheaven/tv/ui/screens/player/PlayerViewModel;->**(**)**
+HPLme/animeheaven/tv/ui/screens/detail/AnimeDetailScreenKt;->**(**)**
+HPLme/animeheaven/tv/ui/screens/player/PlayerScreenKt;->**(**)**
+HPLme/animeheaven/tv/ui/screens/player/PlayerViewModel;->**(**)**
 
 # Targeted AndroidX Compose / Media3 / OkHttp / Coil Core Hot Classes
 HSPLandroidx/compose/foundation/lazy/LazyList**;->**(**)**
 HSPLandroidx/compose/foundation/gestures/ContentInViewNode;->**(**)**
 HSPLandroidx/compose/ui/platform/AndroidComposeView;->**(**)**
 HSPLandroidx/compose/ui/focus/FocusOwnerImpl;->**(**)**
-HSPLandroidx/media3/exoplayer/ExoPlayerImpl**;->**(**)**
-HSPLandroidx/media3/exoplayer/DefaultLoadControl;->**(**)**
-HSPLandroidx/media3/exoplayer/source/ProgressiveMediaPeriod**;->**(**)**
-HSPLandroidx/media3/extractor/mp4/Mp4Extractor;->**(**)**
+HPLandroidx/media3/exoplayer/ExoPlayerImpl**;->**(**)**
+HPLandroidx/media3/exoplayer/DefaultLoadControl;->**(**)**
+HPLandroidx/media3/exoplayer/source/ProgressiveMediaPeriod**;->**(**)**
+HPLandroidx/media3/extractor/mp4/Mp4Extractor;->**(**)**
 HSPLandroidx/media3/datasource/cache/SimpleCache;->**(**)**
 HSPLandroidx/media3/datasource/cache/CacheDataSource;->**(**)**
 HSPLandroidx/media3/datasource/cache/CacheDataSink;->**(**)**

@@ -32,6 +32,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -99,8 +100,7 @@ class MirrorHealthTracker(
 
     private val lastPersistedAtMs = ConcurrentHashMap<String, Long>()
 
-    private fun saveHost(host: String, stats: HostStats, forcePersist: Boolean = true) {
-        statsByHost[host] = stats
+    private fun persistHost(host: String, stats: HostStats, forcePersist: Boolean) {
         if (prefs == null) return
         val now = clockMs()
         val prevPersist = lastPersistedAtMs[host] ?: 0L
@@ -110,11 +110,15 @@ class MirrorHealthTracker(
         }
     }
 
+    private fun updateHost(host: String, forcePersist: Boolean = true, update: (HostStats?) -> HostStats) {
+        statsByHost.compute(host) { _, old ->
+            update(old).also { persistHost(host, it, forcePersist) }
+        }
+    }
+
     fun recordSuccess(url: String, latencyMs: Long = 100L) {
         val host = extractHost(url) ?: return
-        val prev = statsByHost[host]
-        saveHost(
-            host,
+        updateHost(host) { prev ->
             HostStats(
                 lastLatencyMs = latencyMs.coerceAtLeast(1L),
                 failureCount = 0,
@@ -122,15 +126,13 @@ class MirrorHealthTracker(
                 isStubVideo = false,
                 avgBytesPerSec = prev?.avgBytesPerSec ?: 0L
             )
-        )
+        }
     }
 
     fun recordProbeSuccess(url: String, latencyMs: Long, contentLength: Long) {
         val host = extractHost(url) ?: return
-        val prev = statsByHost[host]
         val stub = contentLength in 0L until MIN_VALID_VIDEO_BYTES
-        saveHost(
-            host,
+        updateHost(host) { prev ->
             HostStats(
                 lastLatencyMs = latencyMs.coerceAtLeast(1L),
                 failureCount = 0,
@@ -138,45 +140,36 @@ class MirrorHealthTracker(
                 isStubVideo = stub,
                 avgBytesPerSec = if (stub) 0L else (prev?.avgBytesPerSec ?: 0L)
             )
-        )
+        }
     }
 
     fun recordChunkThroughput(url: String, bytes: Long, elapsedMs: Long) {
         if (bytes <= 0L || elapsedMs <= 0L) return
         val host = extractHost(url) ?: return
         val sampleBps = ((bytes * 1000L) / elapsedMs).coerceAtLeast(1L)
-        val prev = statsByHost[host]
-        val prevBps = prev?.avgBytesPerSec ?: 0L
-        val blendedBps = if (prevBps > 0L) {
-            ((prevBps * 65L) + (sampleBps * 35L)) / 100L
-        } else {
-            sampleBps
-        }
-        saveHost(
-            host,
+        updateHost(host, forcePersist = false) { prev ->
+            val prevBps = prev?.avgBytesPerSec ?: 0L
+            val blendedBps = if (prevBps > 0L) ((prevBps * 65L) + (sampleBps * 35L)) / 100L else sampleBps
             HostStats(
                 lastLatencyMs = prev?.lastLatencyMs?.takeIf { it < Long.MAX_VALUE } ?: elapsedMs,
                 failureCount = 0,
                 lastFailureAtMs = 0L,
                 isStubVideo = false,
                 avgBytesPerSec = blendedBps
-            ),
-            forcePersist = false
-        )
+            )
+        }
     }
 
     fun recordFailure(url: String) {
         val host = extractHost(url) ?: return
-        val prev = statsByHost[host] ?: HostStats()
-        saveHost(
-            host,
+        updateHost(host) { old ->
+            val prev = old ?: HostStats()
             prev.copy(
-                failureCount = prev.failureCount + 1,
+                failureCount = prev.failureCount.coerceAtMost(Int.MAX_VALUE - 1) + 1,
                 lastFailureAtMs = clockMs(),
                 avgBytesPerSec = 0L
-            ),
-            forcePersist = true
-        )
+            )
+        }
     }
 
     fun hasFreshStats(url: String): Boolean {
@@ -268,11 +261,13 @@ class VideoCacheManager(
     )
 ) {
     private val appContext = context.applicationContext
-    private val cacheDir = File(appContext.cacheDir, "video_cache")
+    private val cacheDir = File(appContext.cacheDir, "video_cache").apply { mkdirs() }
+    private val boosterLock = Any()
+    private var boosterStartJob: Job? = null
     private val databaseProvider = StandaloneDatabaseProvider(appContext)
     val simpleCache: SimpleCache = SimpleCache(
         cacheDir,
-        LeastRecentlyUsedCacheEvictor(calculateVideoCacheMaxBytes(cacheDir.usableSpace)),
+        LeastRecentlyUsedCacheEvictor(calculateVideoCacheMaxBytes(appContext.cacheDir.usableSpace)),
         databaseProvider
     )
 
@@ -455,7 +450,7 @@ class VideoCacheManager(
             }
         } catch (ce: CancellationException) {
             throw ce
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             mirrorHealthTracker.recordFailure(url)
             null
         }
@@ -546,7 +541,7 @@ class VideoCacheManager(
                 }
             } catch (ce: CancellationException) {
                 throw ce
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
                 mirrorHealthTracker.recordFailure(url)
             } finally {
                 activePreloadJobs.remove(jobKey)
@@ -563,8 +558,9 @@ class VideoCacheManager(
         opEndMs: Long,
         episodeKey: String? = null,
         explicitCacheKey: String? = null
-    ) {
-        scope.launch {
+    ) = synchronized(boosterLock) {
+        stopPlaybackBooster()
+        boosterStartJob = scope.launch {
             if (probeMetaByUrl[activeUrl] == null) {
                 probeMirrorsSpeed(allSources.ifEmpty { listOf(activeUrl) })
             }
@@ -576,27 +572,33 @@ class VideoCacheManager(
             if (mirrors.isEmpty()) return@launch
             val cacheKey = explicitCacheKey?.takeIf { it.isNotBlank() }
                 ?: buildEpisodeCacheKey(episodeKey, meta.contentLength, activeUrl)
-            applyContentLengthMetadata(cacheKey, meta.contentLength)
-            chunkBooster.startStreamingBoost(
+            synchronized(boosterLock) {
+                coroutineContext.ensureActive()
+                applyContentLengthMetadata(cacheKey, meta.contentLength)
+                chunkBooster.startStreamingBoost(
                 cacheKey = cacheKey,
                 mirrors = mirrors,
                 totalLength = meta.contentLength,
                 initialPositionMs = initialPositionMs,
                 initialDurationMs = initialDurationMs,
                 opEndMs = opEndMs
-            )
+                )
+            }
         }
     }
 
     fun updatePlaybackBoosterPosition(
         positionMs: Long,
         durationMs: Long,
-        opEndMs: Long = 0L
+        opEndMs: Long = 0L,
+        bufferedMs: Long = positionMs
     ) {
-        chunkBooster.updatePlayhead(positionMs, durationMs, opEndMs)
+        chunkBooster.updatePlayhead(positionMs, durationMs, opEndMs, bufferedMs)
     }
 
-    fun stopPlaybackBooster() {
+    fun stopPlaybackBooster() = synchronized(boosterLock) {
+        boosterStartJob?.cancel()
+        boosterStartJob = null
         chunkBooster.stopStreamingBoost()
     }
 
@@ -663,8 +665,10 @@ class VideoCacheManager(
             return fallbackUrl
         }
 
-        fun calculateVideoCacheMaxBytes(usableSpaceBytes: Long): Long =
-            if (usableSpaceBytes >= LARGE_DISK_THRESHOLD_BYTES) VIDEO_CACHE_LARGE_BYTES else VIDEO_CACHE_BASE_BYTES
+        fun calculateVideoCacheMaxBytes(usableSpaceBytes: Long): Long {
+            val target = if (usableSpaceBytes >= LARGE_DISK_THRESHOLD_BYTES) VIDEO_CACHE_LARGE_BYTES else VIDEO_CACHE_BASE_BYTES
+            return minOf(target, usableSpaceBytes.coerceAtLeast(0L) / 4)
+        }
 
         fun parseTotalLengthFromHeaders(
             contentRange: String?,

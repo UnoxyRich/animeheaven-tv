@@ -4,6 +4,8 @@ import java.io.File
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +20,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import me.animeheaven.tv.data.cache.CacheSnapshotCodec
 import me.animeheaven.tv.data.cache.LruCacheMap
@@ -34,6 +39,7 @@ import me.animeheaven.tv.data.model.FastSearchItem
 import me.animeheaven.tv.data.model.HomeFeed
 import me.animeheaven.tv.data.network.AnimeHeavenClient
 import me.animeheaven.tv.data.parser.AnimeHeavenParser
+import me.animeheaven.tv.data.runCatchingCancellable
 
 data class CachedEntry<T>(
     val value: T,
@@ -61,14 +67,9 @@ class RequestCoalescer<V>(
 
     suspend fun getOrFetch(key: String, block: suspend () -> V): V {
         val deferred = inFlight.computeIfAbsent(key) {
-            scope.async {
-                try {
-                    block()
-                } finally {
-                    inFlight.remove(key)
-                }
-            }
+            scope.async(start = CoroutineStart.LAZY) { block() }
         }
+        deferred.invokeOnCompletion { inFlight.remove(key, deferred) }
         return deferred.await()
     }
 }
@@ -86,6 +87,10 @@ class AnimeHeavenRepository(
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val requestCoalescer = RequestCoalescer<String>(repositoryScope)
     private val pendingPersistJobs = ConcurrentHashMap<String, Job>()
+    private val cacheClearMutex = Mutex()
+    private val persistLock = Any()
+    @Volatile private var cacheGeneration = 0L
+    @Volatile private var clearingCache = false
 
     @Volatile
     private var cachedHomeFeed: CachedEntry<HomeFeed>? = null
@@ -389,7 +394,7 @@ class AnimeHeavenRepository(
                     webCacheDao.getRecentDetails(12)
                 }
                 val progressDeferred = async {
-                    watchProgressDao.getAllOnce()
+                    watchProgressDao.getLatestPerAnimeOnce(MIN_RESUME_THRESHOLD_MS)
                 }
 
                 val pageRows = pagesDeferred.await()
@@ -508,16 +513,30 @@ class AnimeHeavenRepository(
         webCacheDao.totalPayloadBytes()
     }
 
-    suspend fun clearWebPageCache() {
-        cachedHomeFeed = null
-        cachedCharts.clear()
-        cachedGrids.clear()
-        cachedDetails.clear()
-        cachedStreams.clear()
-        cachedFastSearch.clear()
-        withContext(Dispatchers.IO) {
-            runCatching { snapshotDir?.let { File(it, HOME_SNAPSHOT_FILENAME).delete() } }
-            webCacheDao.clearAll()
+    suspend fun clearWebPageCache() = cacheClearMutex.withLock {
+        val pending = synchronized(persistLock) {
+            clearingCache = true
+            cacheGeneration++
+            pendingPersistJobs.values.toList().also { pendingPersistJobs.clear() }
+        }
+        try {
+            pending.forEach { it.cancel() }
+            pending.joinAll()
+            cachedHomeFeed = null
+            cachedCharts.clear()
+            cachedGrids.clear()
+            cachedDetails.clear()
+            cachedStreams.clear()
+            cachedFastSearch.clear()
+            withContext(Dispatchers.IO) {
+                runCatching { snapshotDir?.let { File(it, HOME_SNAPSHOT_FILENAME).delete() } }
+                webCacheDao.clearAll()
+            }
+        } finally {
+            synchronized(persistLock) {
+                cacheGeneration++
+                clearingCache = false
+            }
         }
     }
 
@@ -531,11 +550,13 @@ class AnimeHeavenRepository(
         html: String,
         parsed: T,
         fetchedAt: Long,
-        serializer: ((T) -> String)?
-    ) {
+        serializer: ((T) -> String)?,
+        generation: Long
+    ): Unit = synchronized(persistLock) {
+        if (clearingCache || generation != cacheGeneration) return@synchronized
         pendingPersistJobs[cacheKey]?.cancel()
         val job = repositoryScope.launch {
-            runCatching {
+            runCatchingCancellable {
                 val json = serializer?.invoke(parsed)
                 // When structured parsedJson exists, skip GZIP+Base64 raw HTML completely
                 // (saves 100% of compression CPU and 60-80% of SQLite web_cache size).
@@ -548,6 +569,7 @@ class AnimeHeavenRepository(
         }
         pendingPersistJobs[cacheKey] = job
         job.invokeOnCompletion { pendingPersistJobs.remove(cacheKey, job) }
+        Unit
     }
 
     private fun <T : Any> observeWithCache(
@@ -591,12 +613,13 @@ class AnimeHeavenRepository(
             emit(CachedResource.Loading)
         }
 
-        runCatching {
-            val html = requestCoalescer.getOrFetch(cacheKey, networkFetch)
+        val generation = cacheGeneration
+        runCatchingCancellable {
+            val html = requestCoalescer.getOrFetch("$generation:$cacheKey", networkFetch)
             val parsed = withContext(Dispatchers.Default) { parser(html) }
             val fetchedAt = System.currentTimeMillis()
-            memoryPut(CachedEntry(parsed, fetchedAt))
-            persistCacheAsync(cacheKey, html, parsed, fetchedAt, serializer)
+            if (!clearingCache && generation == cacheGeneration) memoryPut(CachedEntry(parsed, fetchedAt))
+            persistCacheAsync(cacheKey, html, parsed, fetchedAt, serializer, generation)
             parsed
         }.onSuccess { fresh ->
             emit(CachedResource.Data(fresh, isRefreshing = false))
@@ -638,14 +661,17 @@ class AnimeHeavenRepository(
             }
         }
 
+        val generation = cacheGeneration
         return try {
-            val html = requestCoalescer.getOrFetch(cacheKey, networkFetch)
+            val html = requestCoalescer.getOrFetch("$generation:$cacheKey", networkFetch)
             val parsed = withContext(Dispatchers.Default) { parser(html) }
             val fetchedAt = System.currentTimeMillis()
-            memoryPut(CachedEntry(parsed, fetchedAt))
-            persistCacheAsync(cacheKey, html, parsed, fetchedAt, serializer)
+            if (!clearingCache && generation == cacheGeneration) memoryPut(CachedEntry(parsed, fetchedAt))
+            persistCacheAsync(cacheKey, html, parsed, fetchedAt, serializer, generation)
             parsed
-        } catch (err: Throwable) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (err: Exception) {
             // Fall back to stale memory/disk cache if offline
             memoryGet()?.let { return it.value }
             val dbRow = withContext(Dispatchers.IO) { webCacheDao.get(cacheKey) }
@@ -673,7 +699,7 @@ class AnimeHeavenRepository(
         }
         if (row.payload.isBlank()) return null
         return runCatching {
-            val html = CacheSnapshotCodec.decompressText(row.payload)
+            val html = CacheSnapshotCodec.decompressText(row.payload) ?: return null
             parser(html)
         }.getOrNull()
     }
@@ -717,7 +743,7 @@ class AnimeHeavenRepository(
 
     // Watch Progress & Continue -> Next Episode (SQLite-deduplicated per anime)
     fun observeContinueWatching(): Flow<List<ContinueWatchingItem>> {
-        return watchProgressDao.observeLatestPerAnime().map(::computeContinueWatchingList)
+        return watchProgressDao.observeLatestPerAnime(MIN_RESUME_THRESHOLD_MS).map(::computeContinueWatchingList)
     }
 
     fun observeAnimeProgressMap(animeId: String): Flow<Map<String, WatchProgressEntity>> {

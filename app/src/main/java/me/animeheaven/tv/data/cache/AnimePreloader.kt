@@ -7,6 +7,7 @@ import coil3.request.allowRgb565
 import coil3.size.Precision
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
@@ -30,6 +32,7 @@ import me.animeheaven.tv.data.network.NetworkPreconnector
 import me.animeheaven.tv.data.network.SkipTimesClient
 import me.animeheaven.tv.data.network.SkipTimesParser
 import me.animeheaven.tv.data.repository.AnimeHeavenRepository
+import me.animeheaven.tv.data.runCatchingCancellable
 import okhttp3.OkHttpClient
 
 /**
@@ -49,9 +52,24 @@ class AnimePreloader(
     private val networkPolicy: NetworkPolicy? = null
 ) {
     private val appContext = context.applicationContext
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val supervisor = SupervisorJob()
+    private val workerScope = CoroutineScope(supervisor + Dispatchers.IO)
+    private val scope = SpeculativeJobs()
     private val band0Gate = Semaphore(3)
     private val band1Gate = Semaphore(2)
+    private val imageGate = Semaphore(4)
+    private var suspended = false
+
+    private fun preloadAllowed(): Boolean = networkPolicy?.effectivePreloadMode() != PreloadMode.DATA_SAVER
+
+    private inner class SpeculativeJobs {
+        fun launch(block: suspend CoroutineScope.() -> Unit): Job = synchronized(this@AnimePreloader) {
+            if (suspended || !preloadAllowed()) return@synchronized Job().apply { cancel() }
+            workerScope.launch {
+                if (preloadAllowed()) block()
+            }
+        }
+    }
 
     private val warmedAnimeDetails = ConcurrentHashMap.newKeySet<String>()
     private val warmedCatalogTabs = ConcurrentHashMap.newKeySet<String>()
@@ -79,10 +97,12 @@ class AnimePreloader(
     }
 
     private suspend fun yieldIfUserActive() {
+        if (!preloadAllowed()) throw CancellationException("Speculative preload disabled")
         if (foregroundUserWorkCount.value <= 0) return
         withTimeoutOrNull(USER_YIELD_MAX_WAIT_MS) {
             foregroundUserWorkCount.first { it <= 0 }
         }
+        if (!preloadAllowed()) throw CancellationException("Speculative preload disabled")
     }
 
     fun preloadImages(
@@ -104,8 +124,7 @@ class AnimePreloader(
         widthPx: Int = ImageTargetSize.STANDARD_CARD.widthPx,
         heightPx: Int = ImageTargetSize.STANDARD_CARD.heightPx
     ) {
-        if (urls.isEmpty() || maxCount <= 0) return
-        val loader = imageLoaderProvider()
+        if (urls.isEmpty() || maxCount <= 0 || !preloadAllowed()) return
         urls.asSequence()
             .filter { it.isNotBlank() }
             .distinct()
@@ -117,14 +136,20 @@ class AnimePreloader(
                     .precision(Precision.INEXACT)
                     .allowRgb565(true)
                     .build()
-                loader.enqueue(request)
+                scope.launch {
+                    imageGate.withPermit {
+                        if (preloadAllowed()) imageLoaderProvider().execute(request)
+                    }
+                }
             }
     }
 
+    @Synchronized
     fun preloadHomeEcosystem(
         feed: HomeFeed,
         continueItems: List<ContinueWatchingItem>
     ) {
+        if (suspended || !preloadAllowed()) return
         // Deduplicate by feed & target episode keys so 5s/15s playback progress updates never re-trigger storms
         val signature = buildString(128) {
             append(feed.banners.firstOrNull()?.animeId.orEmpty())
@@ -142,10 +167,10 @@ class AnimePreloader(
         lastHomeEcosystemSignature = signature
 
         // Band 0: Immediate visible + near-viewport images at EXACT UI target sizes (0ms RAM hits)
-        preloadImages(feed.banners.map { it.bannerImageUrl }, maxCount = 5, targetSize = ImageTargetSize.HERO_BANNER)
-        preloadImages(continueItems.map { it.coverUrl }, maxCount = 8, targetSize = ImageTargetSize.CONTINUE_CARD)
-        preloadImages(feed.popularItems.map { it.coverUrl }, maxCount = 12, targetSize = ImageTargetSize.POPULAR_CARD)
-        preloadImages(feed.scheduleItems.map { it.coverUrl }, maxCount = 16, targetSize = ImageTargetSize.STANDARD_CARD)
+        preloadImages(feed.banners.map { it.bannerImageUrl }, maxCount = 3, targetSize = ImageTargetSize.HERO_BANNER)
+        preloadImages(continueItems.map { it.coverUrl }, maxCount = 4, targetSize = ImageTargetSize.CONTINUE_CARD)
+        preloadImages(feed.popularItems.map { it.coverUrl }, maxCount = 6, targetSize = ImageTargetSize.POPULAR_CARD)
+        preloadImages(feed.scheduleItems.map { it.coverUrl }, maxCount = 8, targetSize = ImageTargetSize.STANDARD_CARD)
 
         // Preconnect learned video CDNs & skip APIs only when Continue Watching shows playback is likely
         if (continueItems.isNotEmpty()) {
@@ -207,7 +232,7 @@ class AnimePreloader(
             // Grace delay so Band-0 visible Home thumbnails never fight Band-1 HTML scraping on animeheaven.me
             delay(BAND1_STARTUP_GRACE_MS)
 
-            feed.banners.take(5).forEachIndexed { idx, banner ->
+            feed.banners.take(2).forEachIndexed { idx, banner ->
                 launch {
                     if (idx > 0) yieldIfUserActive()
                     val detail = warmAnimeDetail(banner.animeId, highPriority = idx == 0)
@@ -232,10 +257,10 @@ class AnimePreloader(
                 yieldIfUserActive()
                 if (warmedCatalogTabs.add("new")) {
                     val items = if (repository.hasFreshChartInMemory("chart:new")) {
-                        runCatching { repository.getNewEpisodes().second }.getOrDefault(emptyList())
+                        runCatchingCancellable { repository.getNewEpisodes().second }.getOrDefault(emptyList())
                     } else {
                         band1Gate.withPermit {
-                            runCatching { repository.getNewEpisodes().second }.getOrDefault(emptyList())
+                            runCatchingCancellable { repository.getNewEpisodes().second }.getOrDefault(emptyList())
                         }
                     }
                     preloadImages(items.map { it.coverUrl }, maxCount = 12, targetSize = ImageTargetSize.STANDARD_CARD)
@@ -249,10 +274,10 @@ class AnimePreloader(
                 yieldIfUserActive()
                 if (warmedCatalogTabs.add("popular")) {
                     val items = if (repository.hasFreshChartInMemory("chart:popular")) {
-                        runCatching { repository.getPopularToday().second }.getOrDefault(emptyList())
+                        runCatchingCancellable { repository.getPopularToday().second }.getOrDefault(emptyList())
                     } else {
                         band1Gate.withPermit {
-                            runCatching { repository.getPopularToday().second }.getOrDefault(emptyList())
+                            runCatchingCancellable { repository.getPopularToday().second }.getOrDefault(emptyList())
                         }
                     }
                     preloadImages(items.map { it.coverUrl }, maxCount = 12, targetSize = ImageTargetSize.STANDARD_CARD)
@@ -267,10 +292,10 @@ class AnimePreloader(
                     yieldIfUserActive()
                     if (warmedCatalogTabs.add(path)) {
                         val items = if (repository.hasFreshChartInMemory("chart:$path", AnimeHeavenRepository.TTL_SEASONAL_MS)) {
-                            runCatching { repository.getSeasonal(path).second }.getOrDefault(emptyList())
+                            runCatchingCancellable { repository.getSeasonal(path).second }.getOrDefault(emptyList())
                         } else {
                             band1Gate.withPermit {
-                                runCatching { repository.getSeasonal(path).second }.getOrDefault(emptyList())
+                                runCatchingCancellable { repository.getSeasonal(path).second }.getOrDefault(emptyList())
                             }
                         }
                         preloadImages(items.map { it.coverUrl }, maxCount = 10, targetSize = ImageTargetSize.STANDARD_CARD)
@@ -297,7 +322,7 @@ class AnimePreloader(
                 }
                 launch {
                     yieldIfUserActive()
-                    val bookmarkIds = runCatching { repository.getBookmarkIdsSnapshot() }
+                    val bookmarkIds = runCatchingCancellable { repository.getBookmarkIdsSnapshot() }
                         .getOrDefault(emptyList())
                     val bmCap = if (networkPolicy?.effectivePreloadMode() == PreloadMode.BALANCED) 3 else 8
                     bookmarkIds.take(bmCap).forEach { id ->
@@ -344,7 +369,7 @@ class AnimePreloader(
                 if (normalized.length >= 2 && warmedSearchQueries.add(normalized)) {
                     yieldIfUserActive()
                     band1Gate.withPermit {
-                        runCatching { repository.fastSearch(query) }.onSuccess { matches ->
+                        runCatchingCancellable { repository.fastSearch(query) }.onSuccess { matches ->
                             preloadImages(
                                 matches.map { it.coverUrl },
                                 maxCount = 4,
@@ -374,6 +399,7 @@ class AnimePreloader(
         onCardFocusedWithNeighbors(animeId, coverUrl)
     }
 
+    @Synchronized
     fun onCardFocusedWithNeighbors(
         animeId: String,
         coverUrl: String = "",
@@ -381,7 +407,7 @@ class AnimePreloader(
         neighborCovers: List<String> = emptyList(),
         targetSize: ImageTargetSize = ImageTargetSize.STANDARD_CARD
     ) {
-        if (animeId.isBlank()) return
+        if (animeId.isBlank() || suspended || !preloadAllowed()) return
         if (coverUrl.isNotBlank()) {
             preloadImages(listOf(coverUrl), maxCount = 1, targetSize = targetSize)
         }
@@ -404,11 +430,13 @@ class AnimePreloader(
         }
     }
 
+    @Synchronized
     fun preloadAnimeDetail(
         detail: AnimeDetail,
         primaryEpisodeKey: String?,
         primaryEpisodeLabel: String?
     ) {
+        if (suspended || !preloadAllowed()) return
         detail.bannerUrl?.let {
             preloadImages(listOf(it), maxCount = 1, targetSize = ImageTargetSize.HERO_BANNER)
         }
@@ -435,7 +463,7 @@ class AnimePreloader(
                 } else {
                     0L
                 }
-                val savedResumeMs = runCatching {
+                val savedResumeMs = runCatchingCancellable {
                     repository.getSavedPositionMs(primaryEpisodeKey)
                 }.getOrDefault(0L)
                 preloadEpisodeBundle(
@@ -496,7 +524,7 @@ class AnimePreloader(
         val targetBytes = networkPolicy?.nextEpisodeEscalatedBytes() ?: (8L * 1024L * 1024L)
         if (nextEpisodeKey.isBlank() || targetBytes <= 0L) return
         scope.launch {
-            runCatching {
+            runCatchingCancellable {
                 val vcm = videoCacheManagerProvider()
                 val stream = repository.resolveEpisodeStream(nextEpisodeKey, animeId)
                 if (stream.videoSources.isNotEmpty()) {
@@ -517,13 +545,14 @@ class AnimePreloader(
     }
 
     private suspend fun warmAnimeDetail(animeId: String, highPriority: Boolean): AnimeDetail? {
+        if (!preloadAllowed()) return null
         if (animeId.isBlank() || !warmedAnimeDetails.add(animeId)) return null
         if (repository.hasFreshDetailInMemory(animeId)) {
-            return runCatching { repository.getAnimeDetail(animeId, forceRefresh = false) }.getOrNull()
+            return runCatchingCancellable { repository.getAnimeDetail(animeId, forceRefresh = false) }.getOrNull()
         }
         val gate = if (highPriority) band0Gate else band1Gate
         return gate.withPermit {
-            runCatching { repository.getAnimeDetail(animeId, forceRefresh = false) }
+            runCatchingCancellable { repository.getAnimeDetail(animeId, forceRefresh = false) }
                 .onSuccess { detail ->
                     // Match EXACT AnimeDetailScreen decode dimensions (eliminates 100% RAM cache miss!)
                     detail.bannerUrl?.let {
@@ -554,7 +583,7 @@ class AnimePreloader(
         if (!firstEpisodeWarm && videoBytes <= 0L) return
 
         band0Gate.withPermit {
-            runCatching {
+            runCatchingCancellable {
                 val vcm = videoCacheManagerProvider()
                 val stream = repository.resolveEpisodeStream(episodeKey, animeId)
                 val title = stream.animeTitle.ifBlank { animeTitle }
@@ -562,7 +591,7 @@ class AnimePreloader(
                 val epNum = SkipTimesParser.parseEpisodeNumber(label)
                 if (epNum != null && title.isNotBlank()) {
                     scope.launch {
-                        runCatching { skipTimesClientProvider().fetchSkipTimes(title, epNum) }
+                        runCatchingCancellable { skipTimesClientProvider().fetchSkipTimes(title, epNum) }
                     }
                 }
                 if (stream.videoSources.isNotEmpty()) {
@@ -589,13 +618,28 @@ class AnimePreloader(
         }
     }
 
-    fun resetSessionMarkers() {
-        warmedAnimeDetails.clear()
-        warmedCatalogTabs.clear()
-        warmedEpisodeStreams.clear()
-        warmedSearchQueries.clear()
-        lastHomeEcosystemSignature = null
-        lastWarmedTopContinueKey = null
+    suspend fun <T> withoutPreloading(block: suspend () -> T): T {
+        val pending = synchronized(this) {
+            suspended = true
+            supervisor.children.toList().also { it.forEach { job -> job.cancel() } }
+        }
+        try {
+            pending.joinAll()
+            return block()
+        } finally {
+            synchronized(this) {
+                warmedAnimeDetails.clear()
+                warmedCatalogTabs.clear()
+                warmedEpisodeStreams.clear()
+                warmedSearchQueries.clear()
+                lastHomeEcosystemSignature = null
+                lastWarmedTopContinueKey = null
+                focusPreloadJob = null
+                detailPreloadJob = null
+                homeEcosystemJob = null
+                suspended = false
+            }
+        }
     }
 
     companion object {

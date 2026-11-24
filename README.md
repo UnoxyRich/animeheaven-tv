@@ -54,11 +54,13 @@ Dependency versions are centralized in [`gradle/libs.versions.toml`](gradle/libs
 ./gradlew assembleRelease
 
 # Build release APK with Compose compiler stability & skippability reports
-./gradlew testDebugUnitTest assembleRelease -PcomposeCompilerReports=true
+./gradlew testDebugUnitTest lintDebug compileDebugAndroidTestKotlin assembleRelease -PcomposeCompilerReports=true
 
-# Install release APK onto an Android TV device / emulator over ADB
-adb install -r app/build/outputs/apk/release/app-release.apk
+# Install an R8-optimized, debug-signed build with a separate application ID
+./gradlew installSideload
 ```
+
+Release APKs are unsigned unless all of `KEYSTORE_FILE`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, and `KEY_PASSWORD` are set as environment variables or Gradle properties. Use `-PversionCode=… -PversionName=…` to set release versions. Auto Backup is disabled; local settings and watch history are not restored after reinstall.
 
 Compose compiler reports are generated under `app/build/compose_compiler/` when `-PcomposeCompilerReports=true` is passed.
 
@@ -68,7 +70,7 @@ Compose compiler reports are generated under `app/build/compose_compiler/` when 
 
 ```text
 app/
-├── compose_stability.conf                  # Reference-stable DI/VM classes for Compose strong skipping
+├── compose_stability.conf                  # Explicit stability contracts for library references
 ├── proguard-rules.pro                      # R8 full-mode optimization & selective keep rules
 └── src/
     ├── main/

@@ -1,20 +1,19 @@
 package me.animeheaven.tv.data.network
 
-import java.io.File
 import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
 import me.animeheaven.tv.data.parser.AnimeHeavenParser
-import okhttp3.Cache
+import okhttp3.CacheControl
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -33,10 +32,30 @@ suspend fun OkHttpClient.awaitResponse(request: Request): Response =
             }
 
             override fun onResponse(call: Call, response: Response) {
-                if (cont.isActive) {
-                    cont.resume(response)
-                } else {
-                    response.close()
+                cont.resume(response) { _, undelivered, _ -> undelivered.close() }
+            }
+        })
+    }
+
+/** Read and close the response while the Call's cancellation hook is still registered. */
+internal suspend fun <T> OkHttpClient.readResponse(request: Request, read: (Response) -> T): T =
+    suspendCancellableCoroutine { cont ->
+        val call = newCall(request)
+        cont.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                cont.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val value = response.use {
+                        if (!cont.isActive) return
+                        read(it)
+                    }
+                    cont.resume(value)
+                } catch (e: Exception) {
+                    cont.resumeWithException(e)
                 }
             }
         })
@@ -53,12 +72,8 @@ class AnimeHeavenClient(
     }
 
     suspend fun fetchHtml(relativePath: String): String {
-        val cleanPath = relativePath.trimStart('/')
-        val url = if (cleanPath.startsWith("http://") || cleanPath.startsWith("https://")) {
-            cleanPath
-        } else {
-            "$BASE_URL/$cleanPath"
-        }
+        val url = SITE.resolve(relativePath)?.takeIf { it.isSiteUrl() }
+            ?: throw IOException("Invalid AnimeHeaven page URL")
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", USER_AGENT)
@@ -66,7 +81,7 @@ class AnimeHeavenClient(
             .header("Accept-Language", "en-US,en;q=0.9")
             .build()
 
-        return executeForBody(okHttpClient, request)
+        return executeForBody(request)
     }
 
     suspend fun fetchFastSearch(query: String): String {
@@ -78,12 +93,13 @@ class AnimeHeavenClient(
             .header("X-Requested-With", "XMLHttpRequest")
             .build()
 
-        return executeForBody(okHttpClient, request)
+        return executeForBody(request)
     }
 
     suspend fun fetchRandomAnimeId(): String {
         val request = Request.Builder()
             .url("$BASE_URL/random.php")
+            .cacheControl(CacheControl.FORCE_NETWORK)
             .header("User-Agent", USER_AGENT)
             .header("Referer", "$BASE_URL/")
             .build()
@@ -107,6 +123,7 @@ class AnimeHeavenClient(
     }
 
     suspend fun fetchGateHtml(episodeKey: String, animeId: String?): String {
+        require(EPISODE_KEY.matches(episodeKey)) { "Invalid episode key" }
         val referer = if (!animeId.isNullOrBlank()) {
             "$BASE_URL/anime.php?$animeId"
         } else {
@@ -114,53 +131,59 @@ class AnimeHeavenClient(
         }
         val request = Request.Builder()
             .url("$BASE_URL/gate.php")
+            .cacheControl(CacheControl.FORCE_NETWORK)
             .header("User-Agent", USER_AGENT)
             .header("Referer", referer)
             .header("Cookie", "key=$episodeKey")
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .build()
 
-        return executeForBody(okHttpClient, request)
+        return executeForBody(request)
     }
 
-    private suspend fun executeForBody(client: OkHttpClient, request: Request): String {
-        val response = client.awaitResponse(request)
-        return withContext(Dispatchers.IO) {
-            response.use { resp ->
-                if (!resp.isSuccessful) {
-                    throw IOException("HTTP ${resp.code} for ${request.url}")
+    private suspend fun executeForBody(request: Request): String {
+        var current = request
+        repeat(6) {
+            val result = noRedirectClient.readResponse(current) { resp ->
+                if (resp.isRedirect) {
+                    val url = resp.header("Location")?.let(current.url::resolve)
+                        ?.takeIf { it.isSiteUrl() }
+                        ?: throw IOException("Invalid AnimeHeaven redirect")
+                    return@readResponse url to null
                 }
-                resp.body?.string() ?: throw IOException("Empty response body for ${request.url}")
+                if (!resp.isSuccessful) throw IOException("HTTP ${resp.code} for ${current.url}")
+                null to (resp.body?.string() ?: throw IOException("Empty response body"))
             }
+            result.second?.let { return it }
+            current = current.newBuilder().url(checkNotNull(result.first)).build()
         }
+        throw IOException("Too many AnimeHeaven redirects")
     }
 
     companion object {
         const val BASE_URL = "https://animeheaven.me"
+        private val SITE = BASE_URL.toHttpUrl()
+        internal val EPISODE_KEY = Regex("[a-zA-Z0-9_-]+")
+        private fun HttpUrl.isSiteUrl(): Boolean =
+            scheme == SITE.scheme && host == SITE.host && port == SITE.port &&
+                username.isEmpty() && password.isEmpty()
         const val USER_AGENT =
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        private const val HTTP_CACHE_SIZE_BYTES = 24L * 1024L * 1024L
-
-        fun defaultOkHttpClient(cacheDir: File? = null): OkHttpClient {
+        fun defaultOkHttpClient(dns: CachedDns = CachedDns()): OkHttpClient {
             val dispatcher = Dispatcher().apply {
                 maxRequests = 32
                 maxRequestsPerHost = 12
             }
             return OkHttpClient.Builder()
                 .dispatcher(dispatcher)
-                .dns(CachedDns())
+                .dns(dns)
                 .connectionPool(ConnectionPool(12, 5, TimeUnit.MINUTES))
                 .followRedirects(true)
                 .followSslRedirects(true)
                 .connectTimeout(8, TimeUnit.SECONDS)
                 .readTimeout(12, TimeUnit.SECONDS)
                 .writeTimeout(12, TimeUnit.SECONDS)
-                .apply {
-                    if (cacheDir != null) {
-                        cache(Cache(File(cacheDir, "http_cache"), HTTP_CACHE_SIZE_BYTES))
-                    }
-                }
                 .addInterceptor { chain ->
                     val original = chain.request()
                     val req = if (original.header("User-Agent") == null) {

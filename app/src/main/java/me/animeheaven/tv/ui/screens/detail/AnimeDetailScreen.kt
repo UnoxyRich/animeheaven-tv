@@ -35,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -82,12 +83,13 @@ fun AnimeDetailScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val palette = LocalAhPalette.current
     val primaryFocusRequester = remember { FocusRequester() }
+    var hasFocusedPrimary by rememberSaveable { mutableStateOf(false) }
 
     val detail = state.detail
     LaunchedEffect(detail?.id) {
-        if (detail != null) {
+        if (detail != null && !hasFocusedPrimary) {
             delay(80L)
-            runCatching { primaryFocusRequester.requestFocus() }
+            hasFocusedPrimary = runCatching { primaryFocusRequester.requestFocus() }.getOrDefault(false)
         }
     }
 
@@ -658,7 +660,7 @@ private fun RelatedOrSimilarRow(
         ) {
             itemsIndexed(
                 items = shows,
-                key = { _, it -> it.id },
+                key = { index, it -> "anime_${index}_${it.id}" },
                 contentType = { _, _ -> "show_card" }
             ) { index, show ->
                 SimilarShowCard(

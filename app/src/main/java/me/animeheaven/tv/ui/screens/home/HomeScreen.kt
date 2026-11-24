@@ -66,9 +66,8 @@ fun HomeScreen(
             onSelectBookmarks = onOpenBookmarks,
             onSelectPopular = onOpenPopular,
             onSelectSeasonal = {
-                val path = feed?.seasonPath ?: "2025fall.php"
                 val label = feed?.seasonLabel ?: "Season"
-                onOpenSeasonal(path, label)
+                feed?.seasonPath?.takeIf { it.isNotBlank() }?.let { onOpenSeasonal(it, label) }
             },
             onSelectRandom = onOpenRandom,
             onSelectSettings = onOpenSettings
@@ -145,7 +144,7 @@ fun HomeScreen(
                     if (state.viewMode == FeedViewMode.LIST) {
                         itemsIndexed(
                             items = feed.scheduleItems,
-                            key = { _, it -> it.id },
+                            key = { index, it -> "anime_${index}_${it.id}" },
                             contentType = { _, _ -> "schedule_list_card" }
                         ) { index, card ->
                             ScheduleListCard(

@@ -105,6 +105,7 @@ import me.animeheaven.tv.ui.components.AhStaticFocusableBox
 import me.animeheaven.tv.ui.components.formatDurationMs
 import me.animeheaven.tv.ui.theme.LocalAhPalette
 
+@OptIn(UnstableApi::class)
 private enum class ResizeOption(val label: String, val mode: Int) {
     FIT("Fit", AspectRatioFrameLayout.RESIZE_MODE_FIT),
     FILL("Fill", AspectRatioFrameLayout.RESIZE_MODE_FILL),
@@ -174,6 +175,7 @@ fun PlayerScreen(
     val surfaceFocusRequester = remember { FocusRequester() }
     val playPauseFocusRequester = remember { FocusRequester() }
     val upNextPlayFocusRequester = remember { FocusRequester() }
+    val retryFocusRequester = remember { FocusRequester() }
 
     val exoPlayer = remember(context, videoCacheManager) {
         val renderersFactory = DefaultRenderersFactory(context)
@@ -190,37 +192,44 @@ fun PlayerScreen(
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
-            .apply {
-                playWhenReady = true
-            }
+    }
+    var resumeOnStart by remember(exoPlayer) { mutableStateOf(false) }
+
+    val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsStateWithLifecycle(
+        minActiveState = Lifecycle.State.CREATED
+    )
+    val keepAwake = lifecycleState.isAtLeast(Lifecycle.State.STARTED) &&
+        state.errorMessage == null && (isPlaying || isBuffering && exoPlayer.playWhenReady)
+    DisposableEffect(view, keepAwake) {
+        view.keepScreenOn = keepAwake
+        onDispose { view.keepScreenOn = false }
     }
 
-    // Keep screen on & hide TV system bars during playback
     DisposableEffect(view) {
         val window = (context as? Activity)?.window
-        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val insetsController = window?.let { WindowCompat.getInsetsController(it, view) }
         insetsController?.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         insetsController?.hide(WindowInsetsCompat.Type.systemBars())
 
         onDispose {
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             insetsController?.show(WindowInsetsCompat.Type.systemBars())
         }
     }
 
-    // Lifecycle & ExoPlayer listener + cleanup
-    DisposableEffect(lifecycleOwner, exoPlayer) {
+    fun saveCurrentProgress() {
+        val item = exoPlayer.currentMediaItem ?: return
+        if (item.mediaId != latestState.stream?.episodeKey) return
+        viewModel.persistProgress(exoPlayer.currentPosition.coerceAtLeast(0L),
+            exoPlayer.duration.coerceAtLeast(progressState.durationMs))
+    }
+
+    DisposableEffect(exoPlayer) {
         val playerListener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
                 if (!playing) {
-                    val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
-                    val dur = exoPlayer.duration.coerceAtLeast(progressState.durationMs)
-                    if (dur > 0L) {
-                        viewModel.persistProgress(pos, dur)
-                    }
+                    saveCurrentProgress()
                 }
             }
 
@@ -275,36 +284,48 @@ fun PlayerScreen(
             }
         }
         exoPlayer.addListener(playerListener)
+        onDispose {
+            exoPlayer.removeListener(playerListener)
+            saveCurrentProgress()
+            viewModel.stopStreamingBoost()
+            exoPlayer.release()
+        }
+    }
 
+    DisposableEffect(lifecycleOwner, exoPlayer) {
         val lifecycleObserver = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
-                viewModel.persistProgress(
-                    positionMs = exoPlayer.currentPosition.coerceAtLeast(0L),
-                    durationMs = exoPlayer.duration.coerceAtLeast(progressState.durationMs)
-                )
+                resumeOnStart = exoPlayer.playWhenReady
+                viewModel.stopStreamingBoost()
+                saveCurrentProgress()
                 exoPlayer.pause()
+            } else if (event == Lifecycle.Event.ON_START && resumeOnStart) {
+                resumeOnStart = false
+                val snapshot = latestState
+                val url = snapshot.mirrorState.currentUrl
+                if (url != null && snapshot.errorMessage == null &&
+                    exoPlayer.currentMediaItem?.mediaId == snapshot.stream?.episodeKey
+                ) {
+                    exoPlayer.play()
+                    viewModel.startStreamingBoost(url, snapshot.activeCacheKey ?: url,
+                        exoPlayer.currentPosition, exoPlayer.duration)
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
-        onDispose {
-            viewModel.stopStreamingBoost()
-            viewModel.persistProgress(
-                positionMs = exoPlayer.currentPosition.coerceAtLeast(0L),
-                durationMs = exoPlayer.duration.coerceAtLeast(progressState.durationMs)
-            )
-            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
-            exoPlayer.removeListener(playerListener)
-            exoPlayer.release()
-        }
+        onDispose { lifecycleOwner.lifecycle.removeObserver(lifecycleObserver) }
     }
 
     // Load active mirror URL into ExoPlayer with shared episode cache key & direct resume position
     val activeUrl = state.mirrorState.currentUrl
     val activeCacheKey = state.activeCacheKey ?: activeUrl
     val episodeKey = state.stream?.episodeKey
-    LaunchedEffect(activeUrl, episodeKey) {
-        if (!activeUrl.isNullOrBlank() && !activeCacheKey.isNullOrBlank()) {
+    LaunchedEffect(exoPlayer, lifecycleOwner, activeUrl, episodeKey, state.errorMessage) {
+        if (state.errorMessage != null || activeUrl.isNullOrBlank() || activeCacheKey.isNullOrBlank() || episodeKey == null) {
+            exoPlayer.pause()
+            exoPlayer.clearMediaItems()
+        } else {
             // Keep an in-flight preload of THIS exact episode alive while cancelling unrelated ones
             videoCacheManager.cancelPreloadsExcept(episodeKey ?: activeUrl)
             showUpNextOverlay = false
@@ -317,14 +338,17 @@ fun PlayerScreen(
 
             val mediaItem = MediaItem.Builder()
                 .setUri(activeUrl)
+                .setMediaId(episodeKey)
                 .setCustomCacheKey(activeCacheKey)
                 .build()
             // Pass startPositionMs BEFORE prepare() so ExoPlayer never wastes bandwidth fetching pos 0 on resume
             exoPlayer.setMediaItem(mediaItem, resumeMs)
             exoPlayer.prepare()
             exoPlayer.setPlaybackSpeed(playbackSpeed)
-            exoPlayer.playWhenReady = true
-            viewModel.startStreamingBoost(
+            val started = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+            exoPlayer.playWhenReady = started
+            resumeOnStart = !started
+            if (started) viewModel.startStreamingBoost(
                 activeUrl = activeUrl,
                 activeCacheKey = activeCacheKey,
                 initialPositionMs = resumeMs,
@@ -351,14 +375,14 @@ fun PlayerScreen(
             if (dur > 0L) progressState.durationMs = dur
             progressState.bufferedMs = buf
 
-            viewModel.updateBoosterProgress(pos, resolvedDur)
+            viewModel.updateBoosterProgress(pos, resolvedDur, buf)
             val playingNow = exoPlayer.isPlaying
             if (playingNow && (buf - pos) >= 18_000L) {
                 viewModel.onPlaybackHealthyBufferAhead()
             }
             if (latestIsBuffering && exoPlayer.playWhenReady && !latestShowUpNext && (buf - pos) < 1_500L) {
                 continuousBufferingMs += 500L
-                if (continuousBufferingMs >= 5_500L) {
+                if (continuousBufferingMs >= 15_000L) {
                     continuousBufferingMs = 0L
                     viewModel.onBufferingStallDetected(pos)
                 }
@@ -520,7 +544,7 @@ fun PlayerScreen(
             .focusRequester(surfaceFocusRequester)
             .focusable()
             .onPreviewKeyEvent { keyEvent ->
-                if (keyEvent.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if (state.errorMessage != null || keyEvent.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when (keyEvent.key) {
                     Key.MediaPlayPause -> {
                         if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
@@ -619,6 +643,7 @@ fun PlayerScreen(
                     playerView.resizeMode = resizeOption.mode
                 }
             },
+            onRelease = { it.player = null },
             modifier = Modifier.fillMaxSize()
         )
 
@@ -662,9 +687,11 @@ fun PlayerScreen(
 
         // Stream / Mirror Error Overlay
         if (state.errorMessage != null) {
+            LaunchedEffect(state.errorMessage) { retryFocusRequester.requestFocus() }
             AhErrorBox(
                 errorMessage = state.errorMessage ?: "Playback failed",
-                onRetry = viewModel::retryCurrentEpisode
+                onRetry = viewModel::retryCurrentEpisode,
+                retryModifier = Modifier.focusRequester(retryFocusRequester)
             )
         }
 

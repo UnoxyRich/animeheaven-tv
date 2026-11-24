@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import me.animeheaven.tv.data.cache.LruCacheMap
 import me.animeheaven.tv.data.local.WebCacheDao
 import me.animeheaven.tv.data.local.WebCacheEntity
+import me.animeheaven.tv.data.runCatchingCancellable
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -183,7 +184,7 @@ class SkipTimesClient(
         val memKey = "$normalized#$episodeNumber"
         skipTimesMemCache[memKey]?.let { return it }
 
-        return runCatching {
+        return runCatchingCancellable {
             val malId = resolveMalIdCoalesced(animeTitle, normalized)
                 ?: return EpisodeSkipTimes()
             val cacheKey = "aniskip:$malId:$episodeNumber"
@@ -203,9 +204,9 @@ class SkipTimesClient(
                 .header("Accept", "application/json")
                 .build()
 
-            fastClient.awaitResponse(request).use { resp ->
-                val body = withContext(Dispatchers.IO) { resp.body?.string().orEmpty() }
-                if (resp.isSuccessful && body.isNotBlank()) {
+            val (code, body) = fastClient.readResponse(request) { it.code to it.body?.string().orEmpty() }
+            when {
+                code == 200 && body.isNotBlank() -> {
                     withContext(Dispatchers.IO) {
                         webCacheDao?.upsert(WebCacheEntity(cacheKey, body, now))
                     }
@@ -213,7 +214,7 @@ class SkipTimesClient(
                     skipTimesMemCache[memKey] = parsed
                     return parsed
                 }
-                if (resp.code == 404) {
+                code == 404 -> {
                     val emptyPayload = """{"found":false,"results":[]}"""
                     withContext(Dispatchers.IO) {
                         webCacheDao?.upsert(WebCacheEntity(cacheKey, emptyPayload, now))
@@ -222,7 +223,7 @@ class SkipTimesClient(
                     skipTimesMemCache[memKey] = empty
                     return empty
                 }
-                EpisodeSkipTimes()
+                else -> EpisodeSkipTimes()
             }
         }.getOrDefault(EpisodeSkipTimes())
     }
@@ -234,14 +235,11 @@ class SkipTimesClient(
         }
 
         val deferred = inFlightMalIds.computeIfAbsent(normalized) {
-            scope.async {
-                try {
-                    resolveMalIdInternal(rawTitle, normalized)
-                } finally {
-                    inFlightMalIds.remove(normalized)
-                }
+            scope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+                resolveMalIdInternal(rawTitle, normalized)
             }
         }
+        deferred.invokeOnCompletion { inFlightMalIds.remove(normalized, deferred) }
         return deferred.await()
     }
 
@@ -270,18 +268,12 @@ class SkipTimesClient(
             .header("Accept", "application/json")
             .build()
 
-        val malId = runCatching {
-            fastClient.awaitResponse(request).use { resp ->
-                if (!resp.isSuccessful) return@use null
-                val body = resp.body?.string().orEmpty()
-                SkipTimesParser.parseMalIdFromAniList(body)
-            }
-        }.getOrNull()
-
-        val storedVal = malId ?: -1
+        val storedVal = fastClient.readResponse(request) { resp ->
+            cacheableMalId(resp.code, if (resp.code == 200) resp.body?.string().orEmpty() else "")
+        } ?: return null
         malIdCache[normalized] = storedVal
         webCacheDao?.upsert(WebCacheEntity(dbKey, storedVal.toString(), now))
-        return malId
+        return storedVal.takeIf { it > 0 }
     }
 
     private fun escapeJsonString(raw: String): String = buildString(raw.length) {
@@ -292,12 +284,23 @@ class SkipTimesClient(
                 '\n' -> append("\\n")
                 '\r' -> append("\\r")
                 '\t' -> append("\\t")
-                else -> append(ch)
+                else -> if (ch.code < 0x20) append("\\u").append(ch.code.toString(16).padStart(4, '0'))
+                else append(ch)
             }
         }
     }
 
     companion object {
+        private val NULL_MAL_ID = Regex(""""idMal"\s*:\s*null\b""")
+        private val GRAPHQL_ERRORS = Regex(""""errors"\s*:""")
+
+        internal fun cacheableMalId(code: Int, body: String): Int? = when {
+            code == 404 -> -1
+            code != 200 -> null
+            else -> SkipTimesParser.parseMalIdFromAniList(body)?.takeIf { it > 0 }
+                ?: (-1).takeIf { !GRAPHQL_ERRORS.containsMatchIn(body) && NULL_MAL_ID.containsMatchIn(body) }
+        }
+
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val ANILIST_TTL_MS = TimeUnit.DAYS.toMillis(30)
         private val ANISKIP_TTL_MS = TimeUnit.DAYS.toMillis(7)

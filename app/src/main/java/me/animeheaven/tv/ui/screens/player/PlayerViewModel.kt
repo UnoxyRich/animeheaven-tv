@@ -3,7 +3,9 @@ package me.animeheaven.tv.ui.screens.player
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,6 +19,7 @@ import me.animeheaven.tv.data.network.EpisodeSkipTimes
 import me.animeheaven.tv.data.network.SkipTimesClient
 import me.animeheaven.tv.data.network.SkipTimesParser
 import me.animeheaven.tv.data.repository.AnimeHeavenRepository
+import me.animeheaven.tv.data.runCatchingCancellable
 
 @Immutable
 data class MirrorQueueState(
@@ -65,6 +68,7 @@ class PlayerViewModel(
     initialAnimeId: String,
     initialAnimeTitle: String,
     initialCoverUrl: String,
+    private val progressScope: CoroutineScope,
     private val videoCacheManager: VideoCacheManager? = null,
     private val preloader: AnimePreloader? = null
 ) : ViewModel() {
@@ -86,6 +90,9 @@ class PlayerViewModel(
     private var hasPreloadedNextForEpisode: Boolean = false
     private var isUserPriorityActive: Boolean = false
     private var hasEscalatedNextEpisode: Boolean = false
+    private var progressWrite: Job? = null
+    private data class ProgressSave(val key: String, val position: Long, val duration: Long, val watched: Boolean)
+    private var lastProgressSave: ProgressSave? = null
 
     init {
         loadEpisode(initialEpisodeKey)
@@ -117,7 +124,8 @@ class PlayerViewModel(
                     skipTimesResolved = false
                 )
             }
-            runCatching {
+            runCatchingCancellable {
+                if (forceRefreshGate) repository.invalidateGateStream(episodeKey)
                 val stream = repository.resolveEpisodeStream(
                     episodeKey = episodeKey,
                     animeId = currentState.animeId.ifBlank { null },
@@ -130,6 +138,7 @@ class PlayerViewModel(
                 val resumeMs = resumeOverrideMs ?: repository.getSavedPositionMs(episodeKey)
                 stream to resumeMs
             }.onSuccess { (stream, resumeMs) ->
+                coroutineContext.ensureActive()
                 if (stream.videoSources.isEmpty()) {
                     _uiState.update {
                         it.copy(
@@ -164,6 +173,8 @@ class PlayerViewModel(
                     fetchSkipTimesAsync(resolvedTitle, stream.episodeLabel, stream.episodeKey)
                 }
             }.onFailure { err ->
+                coroutineContext.ensureActive()
+                setPlaybackBufferingActive(false)
                 _uiState.update {
                     it.copy(
                         isLoading = false,
@@ -199,21 +210,14 @@ class PlayerViewModel(
     fun onMirrorPlaybackError(currentPositionMs: Long) {
         videoCacheManager?.stopPlaybackBooster()
         val snapshot = _uiState.value
+        if (snapshot.isLoading || snapshot.mirrorState.exhausted || snapshot.mirrorState.currentUrl == null) return
         snapshot.mirrorState.currentUrl?.let { failedUrl ->
             videoCacheManager?.mirrorHealthTracker?.recordFailure(failedUrl)
         }
         val nextMirrors = snapshot.mirrorState.advanceOnError()
         val episodeKey = snapshot.stream?.episodeKey
         if (nextMirrors.exhausted && !attemptedFreshGate && !episodeKey.isNullOrBlank()) {
-            val savedResumeMs = currentPositionMs.coerceAtLeast(snapshot.initialResumePositionMs)
-            viewModelScope.launch {
-                repository.invalidateGateStream(episodeKey)
-                loadEpisode(
-                    episodeKey = episodeKey,
-                    forceRefreshGate = true,
-                    resumeOverrideMs = savedResumeMs
-                )
-            }
+            loadEpisode(episodeKey, forceRefreshGate = true, resumeOverrideMs = currentPositionMs.coerceAtLeast(0L))
             return
         }
 
@@ -234,7 +238,7 @@ class PlayerViewModel(
                 state.copy(
                     mirrorState = updated,
                     activeCacheKey = nextCacheKey,
-                    initialResumePositionMs = currentPositionMs.coerceAtLeast(state.initialResumePositionMs),
+                    initialResumePositionMs = currentPositionMs.coerceAtLeast(0L),
                     errorMessage = null
                 )
             }
@@ -317,22 +321,21 @@ class PlayerViewModel(
         )
     }
 
-    fun updateBoosterProgress(positionMs: Long, durationMs: Long) {
+    fun updateBoosterProgress(positionMs: Long, durationMs: Long, bufferedMs: Long = positionMs) {
         val state = _uiState.value
         val opEndMs = state.skipTimes.op?.endMs
             ?: (settingsStore.settings.value.skipOpSeconds * 1000L)
-        videoCacheManager?.updatePlaybackBoosterPosition(positionMs, durationMs, opEndMs)
+        videoCacheManager?.updatePlaybackBoosterPosition(positionMs, durationMs, opEndMs, bufferedMs)
     }
 
     fun stopStreamingBoost() {
         videoCacheManager?.stopPlaybackBooster()
+        setPlaybackBufferingActive(false)
     }
 
     fun onBufferingStallDetected(currentPositionMs: Long) {
         val snapshot = _uiState.value
         if (snapshot.mirrorState.totalCount <= 1) return
-        val activeUrl = snapshot.mirrorState.currentUrl ?: return
-        videoCacheManager?.mirrorHealthTracker?.recordFailure(activeUrl)
         onMirrorPlaybackError(currentPositionMs)
     }
 
@@ -362,10 +365,7 @@ class PlayerViewModel(
 
     fun retryCurrentEpisode() {
         val key = _uiState.value.stream?.episodeKey ?: return
-        viewModelScope.launch {
-            repository.invalidateGateStream(key)
-            loadEpisode(key, forceRefreshGate = true)
-        }
+        loadEpisode(key, forceRefreshGate = true)
     }
 
     fun persistProgress(
@@ -376,21 +376,31 @@ class PlayerViewModel(
         val state = _uiState.value
         val stream = state.stream ?: return
         val animeId = state.animeId.ifBlank { stream.animeId.orEmpty() }
-        if (animeId.isBlank()) return
+        if (animeId.isBlank() || durationMs <= 0L) return
+        val position = positionMs.coerceIn(0L, durationMs)
+        if (!forceWatched && lastProgressSave?.let {
+                it.key == stream.episodeKey && it.watched && it.position == position && it.duration == durationMs
+            } == true) return
+        val save = ProgressSave(stream.episodeKey, position, durationMs, forceWatched)
+        if (lastProgressSave == save && progressWrite?.isCancelled != true) return
+        lastProgressSave = save
+        if (!state.isLoading) _uiState.update { it.copy(initialResumePositionMs = position) }
 
-        viewModelScope.launch {
-            repository.saveWatchProgress(
+        val previousWrite = progressWrite
+        progressWrite = progressScope.launch {
+            previousWrite?.join()
+            runCatchingCancellable { repository.saveWatchProgress(
                 episodeKey = stream.episodeKey,
                 animeId = animeId,
                 animeTitle = state.animeTitle.ifBlank { stream.animeTitle },
                 coverUrl = state.coverUrl,
                 episodeLabel = stream.episodeLabel.removePrefix("Episode").trim().ifBlank { stream.episodeLabel },
-                positionMs = positionMs,
+                positionMs = position,
                 durationMs = durationMs,
                 nextEpisodeKey = stream.nextEpisodeKey,
                 nextEpisodeLabel = stream.nextEpisodeLabel?.removePrefix("Episode")?.trim(),
                 forceWatched = forceWatched
-            )
+            ) }.onFailure { android.util.Log.w("PlayerViewModel", "Could not save playback position", it) }
         }
     }
 }

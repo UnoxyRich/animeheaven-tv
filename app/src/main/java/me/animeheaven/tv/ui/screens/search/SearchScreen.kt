@@ -3,6 +3,7 @@ package me.animeheaven.tv.ui.screens.search
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -93,11 +94,8 @@ fun SearchScreen(
         runCatching { firstKeyFocusRequester.requestFocus() }
     }
 
-    val hasAnyResults = if (state.isFullSearchMode) {
-        state.fullResults.isNotEmpty()
-    } else {
-        state.fastResults.isNotEmpty()
-    }
+    val hasAnyResults = state.errorMessage == null &&
+        if (state.isFullSearchMode) state.fullResults.isNotEmpty() else state.fastResults.isNotEmpty()
 
     Column(
         modifier = Modifier
@@ -332,6 +330,8 @@ fun SearchScreen(
                 modifier = Modifier
                     .weight(0.55f)
                     .fillMaxHeight()
+                    .focusRequester(resultsFocusRequester)
+                    .focusGroup()
                     .background(palette.surface, AhShape4)
                     .border(1.dp, palette.borderSubtle, AhShape4)
                     .padding(14.dp)
@@ -397,7 +397,7 @@ fun SearchScreen(
                             ) {
                                 itemsIndexed(
                                     items = state.fullResults,
-                                    key = { _, it -> it.id },
+                                    key = { index, it -> "full_${index}_${it.id}" },
                                     contentType = { _, _ -> "search_grid_card" }
                                 ) { index, item ->
                                     val isLeftCol = index % 3 == 0
@@ -415,7 +415,6 @@ fun SearchScreen(
                                             )
                                         },
                                         modifier = Modifier
-                                            .then(if (index == 0) Modifier.focusRequester(resultsFocusRequester) else Modifier)
                                             .then(
                                                 if (isLeftCol) {
                                                     Modifier.focusProperties { left = firstKeyFocusRequester }
@@ -447,17 +446,13 @@ fun SearchScreen(
                         ) {
                             itemsIndexed(
                                 items = state.fastResults,
-                                key = { _, it -> it.animeId },
+                                key = { index, it -> "fast_${index}_${it.animeId}" },
                                 contentType = { _, _ -> "fast_search_row" }
                             ) { index, item ->
                                 AhFocusableBox(
                                     onClick = { onOpenAnime(item.animeId) },
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .then(
-                                            if (index == 0) Modifier.focusRequester(resultsFocusRequester)
-                                            else Modifier
-                                        )
                                         .focusProperties { left = firstKeyFocusRequester },
                                     containerColor = palette.surfaceElevated,
                                     focusScale = 1.015f,

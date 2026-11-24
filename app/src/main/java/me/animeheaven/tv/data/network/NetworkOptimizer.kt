@@ -7,13 +7,14 @@ import android.net.NetworkCapabilities
 import java.io.IOException
 import java.net.InetAddress
 import java.net.UnknownHostException
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import me.animeheaven.tv.data.cache.LruCacheMap
 import me.animeheaven.tv.data.local.AppSettingsStore
 import me.animeheaven.tv.data.model.PreloadMode
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Dns
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -32,7 +33,7 @@ class CachedDns(
         val resolvedAtMs: Long
     )
 
-    private val cache = ConcurrentHashMap<String, Entry>()
+    private val cache = LruCacheMap<String, Entry>(128)
 
     override fun lookup(hostname: String): List<InetAddress> {
         val key = hostname.lowercase()
@@ -48,7 +49,7 @@ class CachedDns(
             }
             fresh
         } catch (err: UnknownHostException) {
-            cached?.addresses ?: throw err
+            cached?.takeIf { now - it.resolvedAtMs in 0 until ttlMs * 2 }?.addresses ?: throw err
         }
     }
 
@@ -69,7 +70,8 @@ class CachedDns(
  */
 class NetworkPolicy(
     context: Context,
-    private val settingsStore: AppSettingsStore
+    private val settingsStore: AppSettingsStore,
+    private val dns: CachedDns? = null
 ) {
     private val connectivityManager: ConnectivityManager? =
         context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -96,11 +98,12 @@ class NetworkPolicy(
                 }
 
                 override fun onAvailable(network: Network) {
-                    cachedMetered = runCatching { cm.isActiveNetworkMetered }.getOrDefault(false)
+                    cachedMetered = true // Wait for onCapabilitiesChanged rather than querying the old network.
+                    dns?.clear()
                 }
 
                 override fun onLost(network: Network) {
-                    cachedMetered = runCatching { cm.isActiveNetworkMetered }.getOrDefault(false)
+                    cachedMetered = true
                 }
             })
         }
@@ -108,14 +111,8 @@ class NetworkPolicy(
 
     fun isMeteredNetwork(): Boolean = cachedMetered
 
-    fun effectivePreloadMode(): PreloadMode {
-        val configured = settingsStore.settings.value.preloadMode
-        return if (isMeteredNetwork() && configured == PreloadMode.AGGRESSIVE) {
-            PreloadMode.DATA_SAVER
-        } else {
-            configured
-        }
-    }
+    fun effectivePreloadMode(): PreloadMode =
+        resolvePreloadMode(settingsStore.settings.value.preloadMode, isMeteredNetwork())
 
     fun shouldPreloadVideo(): Boolean = effectivePreloadMode() != PreloadMode.DATA_SAVER
 
@@ -128,13 +125,13 @@ class NetworkPolicy(
     }
 
     fun homePopularDetailCount(): Int = when (effectivePreloadMode()) {
-        PreloadMode.AGGRESSIVE -> 10
+        PreloadMode.AGGRESSIVE -> 6
         PreloadMode.BALANCED -> 4
         PreloadMode.DATA_SAVER -> 0
     }
 
     fun homeScheduleDetailCount(): Int = when (effectivePreloadMode()) {
-        PreloadMode.AGGRESSIVE -> 12
+        PreloadMode.AGGRESSIVE -> 6
         PreloadMode.BALANCED -> 4
         PreloadMode.DATA_SAVER -> 0
     }
@@ -164,13 +161,24 @@ class NetworkPolicy(
     }
 }
 
+internal fun resolvePreloadMode(configured: PreloadMode, metered: Boolean): PreloadMode =
+    if (metered) PreloadMode.DATA_SAVER else configured
+
 object NetworkPreconnector {
     private val SKIP_API_URLS = listOf(
         "https://graphql.anilist.co",
         "https://api.aniskip.com"
     )
     private val COOLDOWN_MS = TimeUnit.MINUTES.toMillis(4)
-    private val lastWarmedAtMs = ConcurrentHashMap<String, Long>()
+    private val lastWarmedAtMs = LruCacheMap<String, Long>(64)
+
+    @Synchronized
+    private fun claimWarmup(url: String, now: Long): Boolean {
+        val prev = lastWarmedAtMs[url]
+        if (prev != null && now - prev in 0 until COOLDOWN_MS) return false
+        lastWarmedAtMs[url] = now
+        return true
+    }
 
     fun preconnectAsync(okHttpClient: OkHttpClient) {
         preconnectUrls(okHttpClient, listOf("${AnimeHeavenClient.BASE_URL}/"))
@@ -184,7 +192,7 @@ object NetworkPreconnector {
         if (hosts.isEmpty()) return
         val urls = hosts.asSequence()
             .map { it.trim().lowercase() }
-            .filter { it.isNotBlank() }
+            .filter { it.matches(Regex("""[a-z0-9.-]+""")) }
             .distinct()
             .take(2)
             .map { "https://$it/" }
@@ -195,11 +203,10 @@ object NetworkPreconnector {
     private fun preconnectUrls(okHttpClient: OkHttpClient, urls: List<String>) {
         val now = System.currentTimeMillis()
         for (url in urls) {
-            val prev = lastWarmedAtMs[url]
-            if (prev != null && (now - prev) < COOLDOWN_MS) continue
-            lastWarmedAtMs[url] = now
+            val parsed = url.toHttpUrlOrNull() ?: continue
+            if (!claimWarmup(parsed.toString(), now)) continue
             val req = Request.Builder()
-                .url(url)
+                .url(parsed)
                 .head()
                 .header("User-Agent", AnimeHeavenClient.USER_AGENT)
                 .build()

@@ -3,6 +3,8 @@ package me.animeheaven.tv.ui.screens.catalog
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -90,6 +92,9 @@ class CatalogViewModel(
     private var loadJob: Job? = null
 
     init {
+        viewModelScope.launch {
+            settingsStore.settings.map { it.defaultViewMode }.distinctUntilChanged().collect(::setViewMode)
+        }
         if (repository.seasonHeader.value == null) {
             viewModelScope.launch {
                 runCatching { repository.getHomeFeed(forceRefresh = false) }
