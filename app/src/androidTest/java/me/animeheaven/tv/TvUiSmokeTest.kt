@@ -1,5 +1,6 @@
 package me.animeheaven.tv
 
+import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -10,6 +11,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import java.io.File
+import java.io.FileOutputStream
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -95,13 +98,34 @@ class TvUiSmokeTest {
         composeRule.waitForIdle()
     }
 
-    private fun saveScreenshot(name: String) {
+    private fun runShell(cmd: String): String {
         val uiAutomation = InstrumentationRegistry.getInstrumentation().uiAutomation
-        val path = "/data/local/tmp/ci-screenshots/$name.png"
-        val pfd = uiAutomation.executeShellCommand(
-            "sh -c 'mkdir -p /data/local/tmp/ci-screenshots && screencap -p $path && ls -l $path'"
-        )
-        val output = ParcelFileDescriptor.AutoCloseInputStream(pfd).use { it.readBytes().decodeToString() }
-        assertTrue("Screenshot failed for $name: $output", output.contains("$name.png"))
+        return ParcelFileDescriptor.AutoCloseInputStream(
+            uiAutomation.executeShellCommand(cmd)
+        ).use { it.readBytes().decodeToString() }
+    }
+
+    private fun saveScreenshot(name: String) {
+        val dir = "/data/local/tmp/ci-screenshots"
+        val path = "$dir/$name.png"
+        runShell("mkdir -p $dir")
+        val capOut = runShell("screencap -p $path")
+        var lsOut = runShell("ls -l $path")
+        if (!lsOut.contains("$name.png")) {
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            val bitmap = instrumentation.uiAutomation.takeScreenshot()
+            if (bitmap != null) {
+                val baseDir = instrumentation.targetContext.externalCacheDir
+                    ?: instrumentation.targetContext.cacheDir
+                val tmp = File(baseDir, "$name.png")
+                FileOutputStream(tmp).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                }
+                bitmap.recycle()
+                runShell("cp ${tmp.absolutePath} $path")
+                lsOut = runShell("ls -l $path")
+            }
+        }
+        assertTrue("Screenshot failed for $name (capOut='$capOut', lsOut='$lsOut')", lsOut.contains("$name.png"))
     }
 }
