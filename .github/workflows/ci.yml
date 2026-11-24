@@ -73,7 +73,7 @@ jobs:
         with:
           api-level: 34
           target: android-tv
-          arch: x86_64
+          arch: x86
           ram-size: 2048M
           disk-size: 4096M
           disable-animations: true
