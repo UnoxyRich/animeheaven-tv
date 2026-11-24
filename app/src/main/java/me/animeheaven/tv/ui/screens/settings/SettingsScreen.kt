@@ -83,23 +83,25 @@ fun SettingsScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(palette.surface, AhShape3)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                .background(palette.surface, AhShape4)
+                .border(1.dp, palette.borderSubtle, AhShape4)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            AhStaticFocusableBox(
+            AhFocusableBox(
                 onClick = onBack,
                 modifier = Modifier.size(40.dp),
+                shape = CircleShape,
                 containerColor = palette.surfaceElevated,
-                focusedContainerColor = palette.crimson,
+                focusedContainerColor = Color.White,
                 focusedBorderColor = Color.White
-            ) {
+            ) { isFocused ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                         contentDescription = "Back",
-                        tint = Color.White
+                        tint = if (isFocused) Color.Black else Color.White
                     )
                 }
             }
@@ -531,10 +533,11 @@ private fun OptionChip(
     AhFocusableBox(
         onClick = onClick,
         modifier = modifier,
+        shape = AhShape4,
         containerColor = if (selected) palette.crimson else palette.surfaceElevated,
         focusedContainerColor = Color.White,
         unfocusedBorderColor = if (selected) palette.crimson else palette.borderSubtle,
-        focusedBorderColor = palette.crimson
+        focusedBorderColor = Color.White
     ) { isFocused ->
         Box(
             modifier = Modifier
@@ -545,7 +548,7 @@ private fun OptionChip(
             Text(
                 text = label,
                 color = when {
-                    isFocused -> palette.crimson
+                    isFocused -> Color.Black
                     selected -> Color.White
                     else -> palette.textSecondary
                 },

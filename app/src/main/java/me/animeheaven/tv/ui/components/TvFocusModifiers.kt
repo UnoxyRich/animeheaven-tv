@@ -41,18 +41,21 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import me.animeheaven.tv.ui.theme.LocalAhPalette
 
-val AhOverscanHorizontal: Dp = 36.dp
+val AhOverscanHorizontal: Dp = 40.dp
 val AhOverscanVertical: Dp = 18.dp
 
 // Hoisted common shapes eliminate per-recomposition RoundedCornerShape allocations
 val AhShapeRect: Shape = RectangleShape
-val AhShape2: Shape = RoundedCornerShape(2.dp)
-val AhShape3: Shape = RoundedCornerShape(3.dp)
-val AhShape4: Shape = RoundedCornerShape(4.dp)
+val AhShape2: Shape = RoundedCornerShape(4.dp)
+val AhShape3: Shape = RoundedCornerShape(6.dp)
+val AhShape4: Shape = RoundedCornerShape(8.dp)
+val AhShape8: Shape = RoundedCornerShape(8.dp)
+val AhShape10: Shape = RoundedCornerShape(10.dp)
+val AhShape12: Shape = RoundedCornerShape(12.dp)
 val AhShape16: Shape = RoundedCornerShape(16.dp)
-val AhShape20: Shape = RoundedCornerShape(20.dp)
+val AhShape20: Shape = RoundedCornerShape(24.dp)
 
-private val FOCUS_SCALE_SPEC = tween<Float>(durationMillis = 90)
+private val FOCUS_SCALE_SPEC = tween<Float>(durationMillis = 120)
 
 /**
  * High-performance TV focus container backed by a custom [Modifier.Node]:
@@ -65,14 +68,14 @@ fun AhFocusableBox(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    shape: Shape = AhShape2,
+    shape: Shape = AhShape8,
     containerColor: Color? = null,
     focusedContainerColor: Color? = null,
     unfocusedBorderColor: Color? = null,
     focusedBorderColor: Color? = null,
     borderWidth: Dp = 1.dp,
     focusedBorderWidth: Dp = 2.5.dp,
-    focusScale: Float = 1.03f,
+    focusScale: Float = 1.05f,
     onFocusStateChanged: ((Boolean) -> Unit)? = null,
     content: @Composable BoxScope.(isFocused: Boolean) -> Unit
 ) {
@@ -89,7 +92,7 @@ fun AhFocusableBox(
                     containerColor = containerColor ?: palette.surface,
                     focusedContainerColor = focusedContainerColor ?: palette.surfaceFocused,
                     unfocusedBorderColor = unfocusedBorderColor ?: Color.Unspecified,
-                    focusedBorderColor = focusedBorderColor ?: palette.crimson,
+                    focusedBorderColor = focusedBorderColor ?: Color.White,
                     borderWidth = borderWidth,
                     focusedBorderWidth = focusedBorderWidth,
                     focusScale = focusScale,
@@ -122,14 +125,14 @@ fun AhStaticFocusableBox(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    shape: Shape = AhShape2,
+    shape: Shape = AhShape8,
     containerColor: Color? = null,
     focusedContainerColor: Color? = null,
     unfocusedBorderColor: Color? = null,
     focusedBorderColor: Color? = null,
     borderWidth: Dp = 1.dp,
     focusedBorderWidth: Dp = 2.5.dp,
-    focusScale: Float = 1.03f,
+    focusScale: Float = 1.05f,
     onFocusStateChanged: ((Boolean) -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
@@ -145,7 +148,7 @@ fun AhStaticFocusableBox(
                     containerColor = containerColor ?: palette.surface,
                     focusedContainerColor = focusedContainerColor ?: palette.surfaceFocused,
                     unfocusedBorderColor = unfocusedBorderColor ?: Color.Unspecified,
-                    focusedBorderColor = focusedBorderColor ?: palette.crimson,
+                    focusedBorderColor = focusedBorderColor ?: Color.White,
                     borderWidth = borderWidth,
                     focusedBorderWidth = focusedBorderWidth,
                     focusScale = focusScale,

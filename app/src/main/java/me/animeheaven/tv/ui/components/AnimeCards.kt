@@ -16,12 +16,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListPrefetchStrategy
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -70,10 +72,24 @@ import me.animeheaven.tv.data.model.FeedViewMode
 import me.animeheaven.tv.data.model.RankDirection
 import me.animeheaven.tv.ui.theme.LocalAhPalette
 
-private val HERO_BANNER_SCRIM = Brush.verticalGradient(
-    listOf(Color.Transparent, Color(0xCC000000), Color(0xEE000000))
+private val HERO_LEFT_SCRIM = Brush.horizontalGradient(
+    0.0f to Color(0xF00B0B0B),
+    0.45f to Color(0xB80B0B0B),
+    0.78f to Color(0x330B0B0B),
+    1.0f to Color.Transparent
 )
-private val RANK_BADGE_SHAPE = RoundedCornerShape(6.dp)
+private val HERO_BOTTOM_SCRIM = Brush.verticalGradient(
+    0.0f to Color.Transparent,
+    0.58f to Color(0x440B0B0B),
+    1.0f to Color(0xF50B0B0B)
+)
+private val CARD_BOTTOM_SCRIM = Brush.verticalGradient(
+    0.0f to Color.Transparent,
+    0.45f to Color(0x44000000),
+    1.0f to Color(0xE8000000)
+)
+private val RANK_BADGE_SHAPE = RoundedCornerShape(5.dp)
+private val TOP10_BADGE_SHAPE = RoundedCornerShape(bottomStart = 6.dp)
 
 @Immutable
 data class GridRow<T>(
@@ -125,6 +141,11 @@ fun AhCoverImage(
     )
 }
 
+/**
+ * 2025/2026 Netflix TV Spotlight Hero Billboard:
+ * Full-width cinematic stage with editorial left overlay, A SERIES eyebrow, contextual badges,
+ * signature white "Watch Now" CTA + frosted "More Info" CTA, and subtle bottom-right controls.
+ */
 @Composable
 fun HeroBannerCarousel(
     banners: List<BannerItem>,
@@ -152,136 +173,247 @@ fun HeroBannerCarousel(
     val safeIndex = currentIndex.coerceIn(0, banners.lastIndex)
     val current = banners[safeIndex]
 
-    Row(
+    Box(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = AhOverscanHorizontal)
-            .height(215.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+            .height(312.dp)
+            .clip(AhShape12)
+            .background(palette.surface)
+            .border(1.dp, Color(0x26FFFFFF), AhShape12)
     ) {
-        if (banners.size > 1) {
-            AhStaticFocusableBox(
-                onClick = {
-                    currentIndex = if (safeIndex == 0) banners.lastIndex else safeIndex - 1
-                },
-                modifier = Modifier
-                    .width(42.dp)
-                    .fillMaxHeight(),
-                containerColor = palette.surface,
-                focusedContainerColor = palette.crimson,
-                focusedBorderColor = Color.White,
-                onFocusStateChanged = { isCarouselFocused = it }
-            ) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
-                        contentDescription = "Previous Banner",
-                        tint = Color.White,
-                        modifier = Modifier.size(32.dp)
-                    )
-                }
-            }
+        // Full-bleed crossfading backdrop
+        Crossfade(
+            targetState = current,
+            animationSpec = tween(durationMillis = 320),
+            label = "heroBannerCrossfade"
+        ) { slide ->
+            AhCoverImage(
+                url = slide.bannerImageUrl,
+                contentDescription = slide.title,
+                targetSize = ImageTargetSize.HERO_BANNER,
+                modifier = Modifier.fillMaxSize()
+            )
         }
 
-        AhStaticFocusableBox(
-            onClick = { onBannerClick(current.animeId) },
+        // Cinema vignettes
+        Box(modifier = Modifier.fillMaxSize().background(HERO_LEFT_SCRIM))
+        Box(modifier = Modifier.fillMaxSize().background(HERO_BOTTOM_SCRIM))
+
+        // Left Editorial Spotlight Overlay
+        Column(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
-            containerColor = palette.surface,
-            focusedBorderWidth = 3.dp,
-            focusScale = 1.015f,
-            onFocusStateChanged = { focused ->
-                isCarouselFocused = focused
-                if (focused) onBannerFocused?.invoke(current.animeId, current.bannerImageUrl)
-            }
+                .align(Alignment.BottomStart)
+                .fillMaxWidth(0.64f)
+                .padding(horizontal = 28.dp, vertical = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                Crossfade(
-                    targetState = current,
-                    animationSpec = tween(durationMillis = 220),
-                    label = "heroBannerCrossfade"
-                ) { slide ->
-                    AhCoverImage(
-                        url = slide.bannerImageUrl,
-                        contentDescription = slide.title,
-                        targetSize = ImageTargetSize.HERO_BANNER,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
+            // Netflix-style "A  S E R I E S" eyebrow
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "A",
+                    color = palette.crimson,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Black
+                )
+                Text(
+                    text = "S E R I E S",
+                    color = Color(0xFFD9D9D9),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 2.4.sp
+                )
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .align(Alignment.BottomCenter)
-                        .background(HERO_BANNER_SCRIM)
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .clip(AhShape2)
+                        .background(palette.crimson)
+                        .padding(horizontal = 7.dp, vertical = 2.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Box(
-                                modifier = Modifier
-                                    .background(palette.crimson, AhShape2)
-                                    .padding(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = "FEATURED",
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = current.title,
-                                color = Color.White,
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        if (banners.size > 1) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                banners.forEachIndexed { idx, _ ->
-                                    Box(
-                                        modifier = Modifier
-                                            .size(if (idx == safeIndex) 10.dp else 7.dp)
-                                            .clip(CircleShape)
-                                            .background(
-                                                if (idx == safeIndex) palette.crimson else Color(0x88FFFFFF)
-                                            )
-                                    )
-                                }
-                            }
-                        }
+                    Text(
+                        text = "#${safeIndex + 1} FEATURED",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                }
+            }
+
+            Text(
+                text = current.title,
+                color = Color.White,
+                fontSize = 30.sp,
+                lineHeight = 34.sp,
+                fontWeight = FontWeight.ExtraBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            // Contextual metadata pills
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Trending Now",
+                    color = palette.positiveGreen,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(text = "•", color = Color(0x88FFFFFF), fontSize = 13.sp)
+                Text(
+                    text = "Subbed Anime",
+                    color = Color(0xFFE0E0E0),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Box(
+                    modifier = Modifier
+                        .border(1.dp, Color(0x80FFFFFF), AhShape2)
+                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                ) {
+                    Text(
+                        text = "HD",
+                        color = Color(0xFFE0E0E0),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(2.dp))
+
+            // Signature Netflix White Play + Frosted More Info CTAs
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AhFocusableBox(
+                    onClick = { onBannerClick(current.animeId) },
+                    shape = AhShape3,
+                    containerColor = Color.White,
+                    focusedContainerColor = Color.White,
+                    focusedBorderColor = palette.crimson,
+                    focusedBorderWidth = 3.dp,
+                    focusScale = 1.06f,
+                    onFocusStateChanged = { focused ->
+                        isCarouselFocused = focused
+                        if (focused) onBannerFocused?.invoke(current.animeId, current.bannerImageUrl)
                     }
+                ) { _ ->
+                    Row(
+                        modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PlayArrow,
+                            contentDescription = null,
+                            tint = Color.Black,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Text(
+                            text = "Watch Now",
+                            color = Color.Black,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+
+                AhFocusableBox(
+                    onClick = { onBannerClick(current.animeId) },
+                    shape = AhShape3,
+                    containerColor = Color(0x99333333),
+                    focusedContainerColor = Color(0xE64A4A4A),
+                    unfocusedBorderColor = Color(0x33FFFFFF),
+                    focusedBorderColor = Color.White,
+                    focusedBorderWidth = 2.5.dp,
+                    focusScale = 1.05f,
+                    onFocusStateChanged = { focused ->
+                        isCarouselFocused = focused
+                        if (focused) onBannerFocused?.invoke(current.animeId, current.bannerImageUrl)
+                    }
+                ) { _ ->
+                    Text(
+                        text = "More Info",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 11.dp)
+                    )
                 }
             }
         }
 
+        // Bottom-right subtle carousel controls & progress pills
         if (banners.size > 1) {
-            AhStaticFocusableBox(
-                onClick = { currentIndex = (safeIndex + 1) % banners.size },
+            Row(
                 modifier = Modifier
-                    .width(42.dp)
-                    .fillMaxHeight(),
-                containerColor = palette.surface,
-                focusedContainerColor = palette.crimson,
-                focusedBorderColor = Color.White,
-                onFocusStateChanged = { isCarouselFocused = it }
+                    .align(Alignment.BottomEnd)
+                    .padding(horizontal = 24.dp, vertical = 22.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                        contentDescription = "Next Banner",
-                        tint = Color.White,
-                        modifier = Modifier.size(32.dp)
-                    )
+                AhStaticFocusableBox(
+                    onClick = {
+                        currentIndex = if (safeIndex == 0) banners.lastIndex else safeIndex - 1
+                    },
+                    modifier = Modifier.size(34.dp),
+                    shape = CircleShape,
+                    containerColor = Color(0x88181818),
+                    focusedContainerColor = Color.White,
+                    unfocusedBorderColor = Color(0x44FFFFFF),
+                    focusedBorderColor = Color.White,
+                    focusScale = 1.1f,
+                    onFocusStateChanged = { isCarouselFocused = it }
+                ) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
+                            contentDescription = "Previous Banner",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    banners.forEachIndexed { idx, _ ->
+                        Box(
+                            modifier = Modifier
+                                .width(if (idx == safeIndex) 20.dp else 7.dp)
+                                .height(4.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (idx == safeIndex) palette.crimson else Color(0x66FFFFFF)
+                                )
+                        )
+                    }
+                }
+
+                AhStaticFocusableBox(
+                    onClick = { currentIndex = (safeIndex + 1) % banners.size },
+                    modifier = Modifier.size(34.dp),
+                    shape = CircleShape,
+                    containerColor = Color(0x88181818),
+                    focusedContainerColor = Color.White,
+                    unfocusedBorderColor = Color(0x44FFFFFF),
+                    focusedBorderColor = Color.White,
+                    focusScale = 1.1f,
+                    onFocusStateChanged = { isCarouselFocused = it }
+                ) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                            contentDescription = "Next Banner",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
             }
         }
@@ -305,20 +437,20 @@ fun ContinueWatchingRow(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 14.dp)
+            .padding(top = 18.dp)
     ) {
         Text(
             text = "Continue Watching",
             color = palette.textPrimary,
-            fontSize = 20.sp,
+            fontSize = 21.sp,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(horizontal = AhOverscanHorizontal, vertical = 6.dp)
+            modifier = Modifier.padding(horizontal = AhOverscanHorizontal, vertical = 8.dp)
         )
 
         LazyRow(
             state = rowState,
-            contentPadding = PaddingValues(horizontal = AhOverscanHorizontal),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            contentPadding = PaddingValues(horizontal = AhOverscanHorizontal, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             items(
                 items = items,
@@ -327,9 +459,13 @@ fun ContinueWatchingRow(
             ) { item ->
                 AhStaticFocusableBox(
                     onClick = { onPlayItem(item) },
-                    modifier = Modifier.width(250.dp),
+                    modifier = Modifier.width(268.dp),
+                    shape = AhShape10,
                     containerColor = palette.surface,
-                    focusScale = 1.04f,
+                    unfocusedBorderColor = Color(0x1FFFFFFF),
+                    focusedBorderColor = Color.White,
+                    focusedBorderWidth = 2.5.dp,
+                    focusScale = 1.05f,
                     onFocusStateChanged = { focused ->
                         if (focused) onItemFocused?.invoke(item.animeId, item.coverUrl)
                     }
@@ -349,54 +485,61 @@ fun ContinueWatchingRow(
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .background(Color(0x33000000))
+                                    .background(CARD_BOTTOM_SCRIM)
                             )
-                            Row(
+
+                            // Netflix centered frosted play circle
+                            Box(
                                 modifier = Modifier
-                                    .align(Alignment.TopStart)
-                                    .padding(6.dp)
-                                    .background(
-                                        color = if (item.isNextEpisode) palette.crimson else Color(0xDD121212),
-                                        shape = AhShape2
-                                    )
-                                    .then(
-                                        if (!item.isNextEpisode) {
-                                            Modifier.border(1.dp, palette.crimson, AhShape2)
-                                        } else {
-                                            Modifier
-                                        }
-                                    )
-                                    .padding(horizontal = 7.dp, vertical = 3.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    .align(Alignment.Center)
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xA6000000))
+                                    .border(1.5.dp, Color.White, CircleShape),
+                                contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.PlayArrow,
                                     contentDescription = null,
                                     tint = Color.White,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Text(
-                                    text = if (item.isNextEpisode) {
-                                        "NEXT • ${item.targetEpisodeLabel}"
-                                    } else {
-                                        "RESUME • ${item.targetEpisodeLabel}"
-                                    },
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
+                                    modifier = Modifier.size(26.dp)
                                 )
                             }
 
-                            if (!item.isNextEpisode && item.durationMs > 0L) {
-                                val fraction = (item.resumePositionMs.toFloat() / item.durationMs.toFloat())
-                                    .coerceIn(0.03f, 1f)
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(8.dp)
+                                    .clip(AhShape2)
+                                    .background(if (item.isNextEpisode) palette.crimson else Color(0xCC141414))
+                                    .padding(horizontal = 7.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = if (item.isNextEpisode) {
+                                        "UP NEXT • ${item.targetEpisodeLabel}"
+                                    } else {
+                                        "EP ${item.targetEpisodeLabel}"
+                                    },
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+
+                            // Signature Netflix bottom red progress bar
+                            val fraction = if (!item.isNextEpisode && item.durationMs > 0L) {
+                                (item.resumePositionMs.toFloat() / item.durationMs.toFloat())
+                                    .coerceIn(0.04f, 1f)
+                            } else {
+                                0f
+                            }
+                            if (fraction > 0f) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(4.dp)
+                                        .height(3.5.dp)
                                         .align(Alignment.BottomCenter)
-                                        .background(Color(0x88000000))
+                                        .background(Color(0x55FFFFFF))
                                 ) {
                                     Box(
                                         modifier = Modifier
@@ -408,23 +551,23 @@ fun ContinueWatchingRow(
                             }
                         }
 
-                        Column(modifier = Modifier.padding(10.dp)) {
+                        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
                             Text(
                                 text = item.animeTitle,
                                 color = palette.textPrimary,
                                 fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                fontWeight = FontWeight.Bold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = if (item.isNextEpisode) {
-                                    "Finished ${item.lastWatchedLabel} • Auto-advance"
+                                    "Finished ${item.lastWatchedLabel} • Ready to play"
                                 } else {
-                                    "${formatDurationMs(item.resumePositionMs)} / ${formatDurationMs(item.durationMs)}"
+                                    "${formatDurationMs(item.resumePositionMs)} of ${formatDurationMs(item.durationMs)}"
                                 },
-                                color = palette.crimson,
+                                color = palette.textMuted,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium,
                                 maxLines = 1,
@@ -438,6 +581,10 @@ fun ContinueWatchingRow(
     }
 }
 
+/**
+ * Iconic Netflix "Top 10 Popular Today" swimlane:
+ * Large stylized rank numerals peeking beside 2:3 poster cards with red TOP 10 corner ribbons.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PopularHorizontalStrip(
@@ -453,111 +600,168 @@ fun PopularHorizontalStrip(
         prefetchStrategy = remember { LazyListPrefetchStrategy(nestedPrefetchItemCount = 5) }
     )
 
-    Row(
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = AhOverscanHorizontal)
-            .padding(top = 14.dp)
-            .background(palette.surface, AhShape2)
-            .padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(top = 18.dp)
     ) {
-        VerticalCrimsonTab(
-            text = "POPULAR",
-            onClick = onMoreClick
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = AhOverscanHorizontal, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(AhShape2)
+                        .background(palette.crimson)
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = "TOP 10",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 0.6.sp
+                    )
+                }
+                Text(
+                    text = "Popular in Anime Today",
+                    color = palette.textPrimary,
+                    fontSize = 21.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            AhFocusableBox(
+                onClick = onMoreClick,
+                shape = AhShape20,
+                containerColor = Color(0x26FFFFFF),
+                focusedContainerColor = Color.White,
+                focusedBorderColor = Color.White,
+                focusScale = 1.05f
+            ) { isFocused ->
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text(
+                        text = "Explore All",
+                        color = if (isFocused) Color.Black else palette.textPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                        contentDescription = "Explore Popular",
+                        tint = if (isFocused) Color.Black else palette.textPrimary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
 
         LazyRow(
             state = rowState,
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            contentPadding = PaddingValues(horizontal = AhOverscanHorizontal, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            items(
+            itemsIndexed(
                 items = items,
-                key = { it.id },
-                contentType = { "popular_card" }
-            ) { anime ->
-                AhFocusableBox(
-                    onClick = { onAnimeClick(anime.id) },
-                    modifier = Modifier
-                        .width(172.dp)
-                        .height(154.dp),
-                    containerColor = palette.surfaceElevated,
-                    focusScale = 1.04f,
-                    onFocusStateChanged = { focused ->
-                        if (focused) onItemFocused?.invoke(anime.id, anime.coverUrl)
-                    }
-                ) { isFocused ->
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        AhCoverImage(
-                            url = anime.coverUrl,
-                            contentDescription = anime.title,
-                            targetSize = ImageTargetSize.POPULAR_CARD,
-                            modifier = Modifier.fillMaxSize()
+                key = { _, it -> it.id },
+                contentType = { _, _ -> "popular_card" }
+            ) { index, anime ->
+                val rank = index + 1
+                Row(
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    if (rank <= 10) {
+                        Text(
+                            text = rank.toString(),
+                            color = if (palette.isLight) Color(0x38000000) else Color(0x52FFFFFF),
+                            fontSize = if (rank == 10) 76.sp else 92.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = (-4).sp,
+                            modifier = Modifier
+                                .offset(x = 12.dp, y = 12.dp)
                         )
-                        if (isFocused || anime.title.isNotBlank()) {
+                    }
+
+                    AhFocusableBox(
+                        onClick = { onAnimeClick(anime.id) },
+                        modifier = Modifier
+                            .width(142.dp)
+                            .height(202.dp),
+                        shape = AhShape10,
+                        containerColor = palette.surfaceElevated,
+                        unfocusedBorderColor = Color(0x1FFFFFFF),
+                        focusedBorderColor = Color.White,
+                        focusedBorderWidth = 2.5.dp,
+                        focusScale = 1.06f,
+                        onFocusStateChanged = { focused ->
+                            if (focused) onItemFocused?.invoke(anime.id, anime.coverUrl)
+                        }
+                    ) { isFocused ->
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            AhCoverImage(
+                                url = anime.coverUrl,
+                                contentDescription = anime.title,
+                                targetSize = ImageTargetSize.POPULAR_CARD,
+                                modifier = Modifier.fillMaxSize()
+                            )
+
+                            // Netflix Red TOP 10 corner badge
+                            if (rank <= 10) {
+                                Column(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .clip(TOP10_BADGE_SHAPE)
+                                        .background(palette.crimson)
+                                        .padding(horizontal = 5.dp, vertical = 3.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "TOP",
+                                        color = Color.White,
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Black,
+                                        lineHeight = 9.sp
+                                    )
+                                    Text(
+                                        text = "10",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        lineHeight = 11.sp
+                                    )
+                                }
+                            }
+
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .align(Alignment.BottomCenter)
-                                    .background(
-                                        if (isFocused) Color(0xE6DD0021) else Color(0xB3000000)
-                                    )
-                                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    .background(CARD_BOTTOM_SCRIM)
+                                    .padding(horizontal = 8.dp, vertical = 7.dp)
                             ) {
                                 Text(
                                     text = anime.title,
                                     color = Color.White,
                                     fontSize = 12.sp,
-                                    fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium,
-                                    maxLines = 1,
+                                    fontWeight = if (isFocused) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                    maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
                     }
                 }
-            }
-        }
-
-        VerticalCrimsonTab(
-            text = "MORE",
-            onClick = onMoreClick
-        )
-    }
-}
-
-@Composable
-private fun VerticalCrimsonTab(
-    text: String,
-    onClick: () -> Unit
-) {
-    val palette = LocalAhPalette.current
-    AhFocusableBox(
-        onClick = onClick,
-        modifier = Modifier
-            .width(38.dp)
-            .height(154.dp),
-        containerColor = palette.crimson,
-        focusedContainerColor = Color.White,
-        focusedBorderColor = palette.crimson,
-        focusScale = 1.04f
-    ) { isFocused ->
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            text.forEach { ch ->
-                Text(
-                    text = ch.toString(),
-                    color = if (isFocused) palette.crimson else Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    lineHeight = 14.sp
-                )
             }
         }
     }
@@ -571,24 +775,26 @@ fun SectionHeaderWithToggle(
     modifier: Modifier = Modifier
 ) {
     val palette = LocalAhPalette.current
-    Box(
+    Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = AhOverscanHorizontal, vertical = 12.dp)
+            .padding(horizontal = AhOverscanHorizontal)
+            .padding(top = 18.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(
             text = title,
-            color = palette.textSecondary,
-            fontSize = 24.sp,
+            color = palette.textPrimary,
+            fontSize = 21.sp,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.align(Alignment.Center)
+            modifier = Modifier.weight(1f)
         )
 
         if (viewMode != null && onChangeViewMode != null) {
             Row(
-                modifier = Modifier.align(Alignment.CenterEnd),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -600,7 +806,7 @@ fun SectionHeaderWithToggle(
                         imageVector = AhIcons.FormatListBulleted,
                         contentDescription = "List View",
                         tint = tint,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
                 CircleToggleButton(
@@ -611,7 +817,7 @@ fun SectionHeaderWithToggle(
                         imageVector = AhIcons.GridView,
                         contentDescription = "Grid View",
                         tint = tint,
-                        modifier = Modifier.size(19.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                 }
             }
@@ -630,15 +836,16 @@ private fun CircleToggleButton(
         onClick = onClick,
         modifier = Modifier.size(36.dp),
         shape = CircleShape,
-        containerColor = if (selected) palette.crimson else palette.surfaceElevated,
-        focusedContainerColor = palette.crimson,
-        unfocusedBorderColor = palette.crimson,
-        focusedBorderColor = Color.White,
-        borderWidth = 1.5.dp,
+        containerColor = if (selected) Color.White else palette.surfaceElevated,
+        focusedContainerColor = Color.White,
+        unfocusedBorderColor = if (selected) Color.White else Color(0x33FFFFFF),
+        focusedBorderColor = palette.crimson,
+        borderWidth = 1.dp,
+        focusedBorderWidth = 2.dp,
         focusScale = 1.08f
     ) { isFocused ->
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            icon(if (selected || isFocused) Color.White else palette.textSecondary)
+            icon(if (selected || isFocused) Color.Black else palette.textSecondary)
         }
     }
 }
@@ -657,13 +864,18 @@ fun ScheduleListCard(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = AhOverscanHorizontal, vertical = 5.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         AhFocusableBox(
             onClick = onClick,
             modifier = Modifier.weight(1f),
+            shape = AhShape10,
             containerColor = palette.surface,
+            focusedContainerColor = palette.surfaceElevated,
+            unfocusedBorderColor = Color(0x18FFFFFF),
+            focusedBorderColor = Color.White,
+            focusedBorderWidth = 2.5.dp,
             focusScale = 1.015f,
             onFocusStateChanged = { focused ->
                 if (focused) onItemFocused?.invoke(item.id, item.coverUrl)
@@ -673,12 +885,14 @@ fun ScheduleListCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(10.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .width(208.dp)
+                        .width(196.dp)
                         .aspectRatio(16f / 9f)
+                        .clip(AhShape8)
                 ) {
                     AhCoverImage(
                         url = item.coverUrl,
@@ -686,74 +900,72 @@ fun ScheduleListCard(
                         targetSize = ImageTargetSize.STANDARD_CARD,
                         modifier = Modifier.fillMaxSize()
                     )
-                }
-
-                if (item.episodeLabel.isNotBlank()) {
-                    Text(
-                        text = item.episodeLabel,
-                        color = palette.crimson,
-                        fontSize = if (item.episodeLabel.length > 3) 26.sp else 36.sp,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        modifier = Modifier.width(120.dp)
-                    )
-                } else {
-                    Spacer(modifier = Modifier.width(20.dp))
+                    if (item.episodeLabel.isNotBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(6.dp)
+                                .clip(AhShape2)
+                                .background(palette.crimson)
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "NEW EP ${item.episodeLabel}",
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
                 }
 
                 Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
                         text = item.title,
-                        color = if (isFocused) palette.textPrimary else palette.textSecondary,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        color = if (isFocused) Color.White else palette.textPrimary,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Bold,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center
+                        overflow = TextOverflow.Ellipsis
                     )
                     if (item.japaneseTitle.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = item.japaneseTitle,
                             color = palette.textMuted,
-                            fontSize = 15.sp,
+                            fontSize = 14.sp,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = TextAlign.Center
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     if (item.rankDirection != null || item.timerOrStatus.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         RankOrTimerBadge(item = item)
                     }
                 }
             }
         }
 
-        // Zero-recomposition focus button matching AnimeHeaven's + / X overlay
-        AhStaticFocusableBox(
+        // Netflix "+ My List" circular action
+        AhFocusableBox(
             onClick = onToggleBookmark,
             modifier = Modifier.size(44.dp),
             shape = CircleShape,
-            containerColor = if (isBookmarked) palette.crimson else palette.surface,
-            focusedContainerColor = palette.crimson,
-            unfocusedBorderColor = palette.crimson,
+            containerColor = if (isBookmarked) palette.crimson else palette.surfaceElevated,
+            focusedContainerColor = Color.White,
+            unfocusedBorderColor = if (isBookmarked) palette.crimson else Color(0x38FFFFFF),
             focusedBorderColor = Color.White,
             borderWidth = 1.5.dp,
             focusScale = 1.1f
-        ) {
+        ) { isFocused ->
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Icon(
                     imageVector = if (isBookmarked) AhIcons.Bookmark else AhIcons.BookmarkBorder,
                     contentDescription = if (isBookmarked) "Remove Bookmark" else "Bookmark",
-                    tint = Color.White,
-                    modifier = Modifier.size(22.dp)
+                    tint = if (isFocused) Color.Black else Color.White,
+                    modifier = Modifier.size(21.dp)
                 )
             }
         }
@@ -772,13 +984,18 @@ fun ScheduleGridCard(
     AhFocusableBox(
         onClick = onClick,
         modifier = modifier,
+        shape = AhShape10,
         containerColor = palette.surface,
-        focusScale = 1.03f,
+        focusedContainerColor = palette.surfaceElevated,
+        unfocusedBorderColor = Color(0x18FFFFFF),
+        focusedBorderColor = Color.White,
+        focusedBorderWidth = 2.5.dp,
+        focusScale = 1.05f,
         onFocusStateChanged = { focused ->
             if (focused) onItemFocused?.invoke(item.id, item.coverUrl)
         }
     ) { isFocused ->
-        Column(modifier = Modifier.padding(8.dp)) {
+        Column {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -790,18 +1007,25 @@ fun ScheduleGridCard(
                     targetSize = ImageTargetSize.STANDARD_CARD,
                     modifier = Modifier.fillMaxSize()
                 )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(CARD_BOTTOM_SCRIM)
+                )
                 if (item.episodeLabel.isNotBlank()) {
                     Box(
                         modifier = Modifier
-                            .align(Alignment.TopStart)
+                            .align(Alignment.BottomStart)
+                            .padding(8.dp)
+                            .clip(AhShape2)
                             .background(palette.crimson)
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = item.episodeLabel,
+                            text = "EP ${item.episodeLabel}",
                             color = Color.White,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold
                         )
                     }
                 }
@@ -809,47 +1033,46 @@ fun ScheduleGridCard(
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(5.dp)
+                            .padding(6.dp)
                             .size(26.dp)
                             .clip(CircleShape)
-                            .background(palette.crimson),
+                            .background(Color(0xCC000000))
+                            .border(1.dp, Color(0x66FFFFFF), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = AhIcons.Bookmark,
                             contentDescription = "Bookmarked",
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
+                            tint = palette.crimson,
+                            modifier = Modifier.size(15.dp)
                         )
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = item.title,
-                color = if (isFocused) palette.textPrimary else palette.textSecondary,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-            if (item.japaneseTitle.isNotBlank()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
                 Text(
-                    text = item.japaneseTitle,
-                    color = palette.textMuted,
-                    fontSize = 12.sp,
+                    text = item.title,
+                    color = if (isFocused) Color.White else palette.textPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
+                    overflow = TextOverflow.Ellipsis
                 )
-            }
-            if (item.rankDirection != null || item.timerOrStatus.isNotBlank()) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                if (item.rankDirection != null || item.timerOrStatus.isNotBlank()) {
                     RankOrTimerBadge(item = item)
+                } else if (item.japaneseTitle.isNotBlank()) {
+                    Text(
+                        text = item.japaneseTitle,
+                        color = palette.textMuted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
@@ -867,13 +1090,18 @@ fun SimilarShowCard(
     AhFocusableBox(
         onClick = onClick,
         modifier = modifier,
+        shape = AhShape10,
         containerColor = palette.surface,
-        focusScale = 1.03f,
+        focusedContainerColor = palette.surfaceElevated,
+        unfocusedBorderColor = Color(0x18FFFFFF),
+        focusedBorderColor = Color.White,
+        focusedBorderWidth = 2.5.dp,
+        focusScale = 1.05f,
         onFocusStateChanged = { focused ->
             if (focused) onItemFocused?.invoke(item.id, item.coverUrl)
         }
     ) { isFocused ->
-        Column(modifier = Modifier.padding(6.dp)) {
+        Column {
             AhCoverImage(
                 url = item.coverUrl,
                 contentDescription = item.title,
@@ -882,18 +1110,17 @@ fun SimilarShowCard(
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
             )
-            Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = item.title,
-                color = if (isFocused) palette.textPrimary else palette.textSecondary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
+                color = if (isFocused) Color.White else palette.textSecondary,
+                fontSize = 13.sp,
+                fontWeight = if (isFocused) FontWeight.Bold else FontWeight.SemiBold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(38.dp)
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                    .height(34.dp)
             )
         }
     }
@@ -904,9 +1131,9 @@ private fun RankOrTimerBadge(item: AnimeCard) {
     val palette = LocalAhPalette.current
     if (item.rankDirection != null) {
         val badgeColor = when (item.rankDirection) {
-            RankDirection.UP -> palette.crimson
-            RankDirection.SAME -> palette.crimson
-            RankDirection.DOWN -> palette.surfaceElevated
+            RankDirection.UP -> palette.positiveGreen
+            RankDirection.SAME -> palette.textMuted
+            RankDirection.DOWN -> palette.crimson
         }
         val arrow = when (item.rankDirection) {
             RankDirection.UP -> "▲"
@@ -915,33 +1142,33 @@ private fun RankOrTimerBadge(item: AnimeCard) {
         }
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             Box(
                 modifier = Modifier
-                    .size(26.dp)
-                    .background(badgeColor, RANK_BADGE_SHAPE),
+                    .size(20.dp)
+                    .background(badgeColor.copy(alpha = 0.2f), RANK_BADGE_SHAPE),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = arrow,
-                    color = Color.White,
-                    fontSize = 12.sp,
+                    color = badgeColor,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
             Text(
                 text = item.rankDelta.orEmpty(),
                 color = palette.textSecondary,
-                fontSize = 15.sp,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold
             )
         }
     } else if (item.timerOrStatus.isNotBlank()) {
         Text(
             text = item.timerOrStatus,
-            color = palette.crimson,
-            fontSize = 15.sp,
+            color = palette.positiveGreen,
+            fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -959,23 +1186,38 @@ fun AnimeHeavenFooter(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = AhOverscanHorizontal)
-            .padding(top = 16.dp, bottom = 24.dp)
-            .background(palette.surface, AhShape2)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(top = 20.dp, bottom = 28.dp)
+            .clip(AhShape10)
+            .background(palette.surface)
+            .border(1.dp, palette.borderSubtle, AhShape10)
+            .padding(horizontal = 18.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(
-            text = "AnimeHeaven.me TV • Pure Ad-Free 1080p Streaming",
-            color = palette.textSecondary,
-            fontSize = 14.sp
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "A",
+                color = palette.crimson,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Black
+            )
+            Text(
+                text = "AnimeHeaven TV • Ad-Free 1080p Cinema",
+                color = palette.textMuted,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
         AhFocusableBox(
             onClick = onOpenSettings,
-            shape = CircleShape,
-            containerColor = palette.crimson,
+            shape = AhShape20,
+            containerColor = palette.surfaceElevated,
             focusedContainerColor = Color.White,
-            focusedBorderColor = palette.crimson,
+            unfocusedBorderColor = Color(0x33FFFFFF),
+            focusedBorderColor = Color.White,
             focusScale = 1.06f
         ) { isFocused ->
             Row(
@@ -986,13 +1228,13 @@ fun AnimeHeavenFooter(
                 Icon(
                     imageVector = AhIcons.Tune,
                     contentDescription = null,
-                    tint = if (isFocused) palette.crimson else Color.White,
-                    modifier = Modifier.size(18.dp)
+                    tint = if (isFocused) Color.Black else Color.White,
+                    modifier = Modifier.size(17.dp)
                 )
                 Text(
                     text = "Settings & Theme",
-                    color = if (isFocused) palette.crimson else Color.White,
-                    fontSize = 14.sp,
+                    color = if (isFocused) Color.Black else Color.White,
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -1035,9 +1277,10 @@ fun AhErrorBox(
     ) {
         Column(
             modifier = Modifier
-                .background(palette.surface, AhShape4)
-                .border(1.dp, palette.crimson, AhShape4)
-                .padding(24.dp),
+                .clip(AhShape12)
+                .background(palette.surface)
+                .border(1.dp, palette.borderSubtle, AhShape12)
+                .padding(28.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
@@ -1053,28 +1296,30 @@ fun AhErrorBox(
                 fontSize = 14.sp,
                 textAlign = TextAlign.Center
             )
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(18.dp))
             AhFocusableBox(
                 onClick = onRetry,
-                containerColor = palette.crimson,
+                shape = AhShape3,
+                containerColor = Color.White,
                 focusedContainerColor = Color.White,
-                focusedBorderColor = palette.crimson
-            ) { isFocused ->
+                focusedBorderColor = palette.crimson,
+                focusedBorderWidth = 3.dp
+            ) { _ ->
                 Row(
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+                    modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Refresh,
                         contentDescription = null,
-                        tint = if (isFocused) palette.crimson else Color.White
+                        tint = Color.Black
                     )
                     Text(
-                        text = "Retry",
-                        color = if (isFocused) palette.crimson else Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
+                        text = "Try Again",
+                        color = Color.Black,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.ExtraBold
                     )
                 }
             }

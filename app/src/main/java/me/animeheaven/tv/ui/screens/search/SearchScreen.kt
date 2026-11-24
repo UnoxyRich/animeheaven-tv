@@ -127,39 +127,41 @@ fun SearchScreen(
             },
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Top Custom Search Query Display Bar (Never invokes system IME)
+        // Top Netflix TV Search Query Display Bar (Never invokes system IME)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(palette.surface, AhShape3)
+                .background(palette.surface, AhShape4)
+                .border(1.dp, palette.borderSubtle, AhShape4)
                 .padding(10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            AhStaticFocusableBox(
+            AhFocusableBox(
                 onClick = onBack,
                 modifier = Modifier.size(42.dp),
+                shape = AhShape4,
                 containerColor = palette.surfaceElevated,
-                focusedContainerColor = palette.crimson,
+                focusedContainerColor = Color.White,
                 focusedBorderColor = Color.White
-            ) {
+            ) { isFocused ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                         contentDescription = "Back",
-                        tint = Color.White
+                        tint = if (isFocused) Color.Black else Color.White
                     )
                 }
             }
 
-            // Crimson-bordered Query Box matching .searchf.bc2 + .searchin.bc
+            // Sleek Netflix Search Query Box
             Row(
                 modifier = Modifier
                     .weight(1f)
                     .height(44.dp)
-                    .border(2.dp, palette.crimson, AhShape2)
-                    .background(if (palette.isLight) Color.White else Color.Black, AhShape2)
-                    .padding(horizontal = 12.dp),
+                    .border(1.5.dp, Color(0x38FFFFFF), AhShape4)
+                    .background(if (palette.isLight) Color.White else Color(0xFF0E0E0E), AhShape4)
+                    .padding(horizontal = 14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (state.query.isEmpty()) {
@@ -331,8 +333,8 @@ fun SearchScreen(
                     .weight(0.55f)
                     .fillMaxHeight()
                     .background(palette.surface, AhShape4)
-                    .border(1.dp, palette.crimson.copy(alpha = 0.6f), AhShape4)
-                    .padding(12.dp)
+                    .border(1.dp, palette.borderSubtle, AhShape4)
+                    .padding(14.dp)
             ) {
                 Row(
                     modifier = Modifier

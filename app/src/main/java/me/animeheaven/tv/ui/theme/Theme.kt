@@ -80,24 +80,26 @@ val LocalAhPalette = staticCompositionLocalOf { paletteFor(AhThemeId.DARK) }
 fun paletteFor(themeId: AhThemeId): AhThemePalette = CACHED_PALETTES[themeId.ordinal]
 
 private fun buildPaletteFor(themeId: AhThemeId): AhThemePalette {
-    val crimson = Color(0xFFDD0021)
-    val crimsonDark = Color(0xFF9E0017)
-    val green = Color(0xFF28C76F)
+    val crimson = Color(0xFFE50914) // Signature Netflix Red
+    val crimsonDark = Color(0xFFB20710)
+    val green = Color(0xFF46D369) // Netflix Match Green
 
     return when (themeId) {
         AhThemeId.DARK -> AhThemePalette(
             themeId = themeId,
-            background = Color(0xFF000000),
-            backgroundBrush = null,
-            surface = Color(0xFF121212),
-            surfaceElevated = Color(0xFF1A1A1A),
-            surfaceFocused = Color(0xFF222222),
+            background = Color(0xFF0B0B0B),
+            backgroundBrush = Brush.verticalGradient(
+                colors = listOf(Color(0xFF1A090B), Color(0xFF0B0B0B), Color(0xFF0B0B0B))
+            ),
+            surface = Color(0xFF141414),
+            surfaceElevated = Color(0xFF1F1F1F),
+            surfaceFocused = Color(0xFF2B2B2B),
             crimson = crimson,
             crimsonDark = crimsonDark,
             textPrimary = Color(0xFFFFFFFF),
-            textSecondary = Color(0xFFBDBDBD),
-            textMuted = Color(0xFF8A8A8A),
-            borderSubtle = Color(0xFF262626),
+            textSecondary = Color(0xFFD2D2D2),
+            textMuted = Color(0xFF8C8C8C),
+            borderSubtle = Color(0xFF2A2A2A),
             positiveGreen = green,
             isLight = false
         )
