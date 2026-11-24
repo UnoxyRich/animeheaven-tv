@@ -1,0 +1,88 @@
+name: Android TV CI & UI Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  unit-tests-and-release:
+    name: Unit Tests & Release APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run JVM unit tests, compile Android UI tests & build R8 release APK
+        run: ./gradlew testDebugUnitTest compileDebugAndroidTestKotlin assembleRelease -PcomposeCompilerReports=true
+
+      - name: Upload Release APK & Compose reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: animeheaven-tv-release
+          path: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/compose_compiler/
+
+  android-tv-ui-tests:
+    name: Real Android TV Emulator UI Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests-and-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM hardware acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Boot Android TV Emulator (API 34) & run UI instrumentation tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: android-tv
+          arch: x86_64
+          ram-size: 2048M
+          disk-size: 4096M
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            ./gradlew connectedDebugAndroidTest --stacktrace
+            adb shell am start -n me.animeheaven.tv/.MainActivity
+            sleep 4
+            adb exec-out screencap -p > tv-ui-screenshot.png || true
+
+      - name: Upload UI Test Reports & Screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: animeheaven-tv-ui-tests
+          path: |
+            app/build/reports/androidTests/connected/
+            tv-ui-screenshot.png
