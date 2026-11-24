@@ -54,9 +54,9 @@ class TvUiSmokeTest {
         composeRule.onAllNodesWithText("Search").onFirst().performClick()
 
         composeRule.waitUntil(timeoutMillis = 10_000L) {
-            composeRule.onAllNodesWithText("q").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText("Q").fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onAllNodesWithText("q").onFirst().assertIsDisplayed()
-        composeRule.onAllNodesWithText("q").onFirst().performClick()
+        composeRule.onAllNodesWithText("Q").onFirst().assertIsDisplayed()
+        composeRule.onAllNodesWithText("Q").onFirst().performClick()
     }
 }
