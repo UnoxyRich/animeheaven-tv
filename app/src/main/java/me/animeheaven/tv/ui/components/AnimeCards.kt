@@ -46,6 +46,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
@@ -85,8 +87,9 @@ private val HERO_BOTTOM_SCRIM = Brush.verticalGradient(
 )
 private val CARD_BOTTOM_SCRIM = Brush.verticalGradient(
     0.0f to Color.Transparent,
-    0.45f to Color(0x44000000),
-    1.0f to Color(0xE8000000)
+    0.35f to Color(0x55000000),
+    0.72f to Color(0xCC000000),
+    1.0f to Color(0xF5000000)
 )
 private val RANK_BADGE_SHAPE = RoundedCornerShape(5.dp)
 private val TOP10_BADGE_SHAPE = RoundedCornerShape(bottomStart = 6.dp)
@@ -151,6 +154,7 @@ fun HeroBannerCarousel(
     banners: List<BannerItem>,
     onBannerClick: (String) -> Unit,
     onBannerFocused: ((animeId: String, imageUrl: String) -> Unit)? = null,
+    primaryFocusRequester: FocusRequester? = null,
     modifier: Modifier = Modifier
 ) {
     if (banners.isEmpty()) return
@@ -177,9 +181,11 @@ fun HeroBannerCarousel(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = AhOverscanHorizontal)
-            .height(312.dp)
+            .height(266.dp)
             .clip(AhShape12)
-            .background(palette.surface)
+            .background(
+                Brush.linearGradient(listOf(Color(0xFF280A0E), Color(0xFF141414)))
+            )
             .border(1.dp, Color(0x26FFFFFF), AhShape12)
     ) {
         // Full-bleed crossfading backdrop
@@ -293,6 +299,11 @@ fun HeroBannerCarousel(
             ) {
                 AhFocusableBox(
                     onClick = { onBannerClick(current.animeId) },
+                    modifier = if (primaryFocusRequester != null) {
+                        Modifier.focusRequester(primaryFocusRequester)
+                    } else {
+                        Modifier
+                    },
                     shape = AhShape3,
                     containerColor = Color.White,
                     focusedContainerColor = Color.White,
@@ -669,8 +680,13 @@ fun PopularHorizontalStrip(
 
         LazyRow(
             state = rowState,
-            contentPadding = PaddingValues(horizontal = AhOverscanHorizontal, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            contentPadding = PaddingValues(
+                start = AhOverscanHorizontal,
+                end = AhOverscanHorizontal,
+                top = 4.dp,
+                bottom = 10.dp
+            ),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             itemsIndexed(
                 items = items,
@@ -684,20 +700,19 @@ fun PopularHorizontalStrip(
                     if (rank <= 10) {
                         Text(
                             text = rank.toString(),
-                            color = if (palette.isLight) Color(0x38000000) else Color(0x52FFFFFF),
-                            fontSize = if (rank == 10) 76.sp else 92.sp,
+                            color = if (palette.isLight) Color(0x38000000) else Color(0x5AFFFFFF),
+                            fontSize = if (rank == 10) 64.sp else 78.sp,
                             fontWeight = FontWeight.Black,
-                            letterSpacing = (-4).sp,
-                            modifier = Modifier
-                                .offset(x = 12.dp, y = 12.dp)
+                            letterSpacing = (-3).sp,
+                            modifier = Modifier.offset(x = 8.dp, y = 4.dp)
                         )
                     }
 
                     AhFocusableBox(
                         onClick = { onAnimeClick(anime.id) },
                         modifier = Modifier
-                            .width(142.dp)
-                            .height(202.dp),
+                            .width(126.dp)
+                            .height(176.dp),
                         shape = AhShape10,
                         containerColor = palette.surfaceElevated,
                         unfocusedBorderColor = Color(0x1FFFFFFF),
@@ -901,6 +916,11 @@ fun ScheduleListCard(
                         modifier = Modifier.fillMaxSize()
                     )
                     if (item.episodeLabel.isNotBlank()) {
+                        val badgeText = if (item.rankDirection != null) {
+                            "#${item.episodeLabel}"
+                        } else {
+                            "NEW EP ${item.episodeLabel}"
+                        }
                         Box(
                             modifier = Modifier
                                 .align(Alignment.BottomStart)
@@ -910,7 +930,7 @@ fun ScheduleListCard(
                                 .padding(horizontal = 7.dp, vertical = 2.dp)
                         ) {
                             Text(
-                                text = "NEW EP ${item.episodeLabel}",
+                                text = badgeText,
                                 color = Color.White,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.ExtraBold
@@ -1013,6 +1033,11 @@ fun ScheduleGridCard(
                         .background(CARD_BOTTOM_SCRIM)
                 )
                 if (item.episodeLabel.isNotBlank()) {
+                    val badgeText = if (item.rankDirection != null) {
+                        "#${item.episodeLabel}"
+                    } else {
+                        "EP ${item.episodeLabel}"
+                    }
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomStart)
@@ -1022,7 +1047,7 @@ fun ScheduleGridCard(
                             .padding(horizontal = 7.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = "EP ${item.episodeLabel}",
+                            text = badgeText,
                             color = Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.ExtraBold

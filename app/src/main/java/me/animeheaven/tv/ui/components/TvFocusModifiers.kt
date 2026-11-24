@@ -21,11 +21,14 @@ import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.addOutline
 import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.layout.Measurable
 import androidx.compose.ui.layout.MeasureResult
 import androidx.compose.ui.layout.MeasureScope
@@ -33,6 +36,7 @@ import androidx.compose.ui.node.DrawModifierNode
 import androidx.compose.ui.node.LayoutModifierNode
 import androidx.compose.ui.node.ModifierNodeElement
 import androidx.compose.ui.node.invalidateDraw
+import androidx.compose.ui.node.invalidateLayer
 import androidx.compose.ui.platform.InspectorInfo
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
@@ -219,6 +223,7 @@ private data class AhTvFocusModifierElement(
         }
         if (visualChanged) {
             node.invalidateDraw()
+            node.invalidateLayer()
         }
     }
 
@@ -298,9 +303,21 @@ private class AhTvFocusNode(
     override fun ContentDrawScope.draw() {
         val activeFocus = isFocused && enabled
         val bg = if (activeFocus) focusedContainerColor else containerColor
+        val nodeShape = shape
+        val cachedOutline = if (nodeShape !== RectangleShape && nodeShape !== CircleShape) {
+            nodeShape.createOutline(size, layoutDirection, this)
+        } else {
+            null
+        }
+
         if (bg != Color.Transparent && bg != Color.Unspecified) {
-            // GraphicsLayer already clips to `shape`, so drawRect fills exact clipped area with 0 path cost
-            drawRect(color = bg)
+            when (nodeShape) {
+                RectangleShape -> drawRect(color = bg)
+                CircleShape -> drawCircle(color = bg, radius = size.minDimension / 2f)
+                else -> if (cachedOutline != null) {
+                    drawOutline(outline = cachedOutline, color = bg)
+                }
+            }
         }
 
         drawContent()
@@ -309,7 +326,6 @@ private class AhTvFocusNode(
         if (borderColor != Color.Unspecified && borderColor != Color.Transparent) {
             val strokePx = (if (activeFocus) focusedBorderWidth else borderWidth).toPx()
             if (strokePx > 0f) {
-                val nodeShape = shape
                 when (nodeShape) {
                     RectangleShape -> {
                         val half = strokePx / 2f
@@ -331,14 +347,15 @@ private class AhTvFocusNode(
                             style = Stroke(width = strokePx)
                         )
                     }
-                    else -> {
-                        // Layer clips outer half of stroke cleanly, leaving an exact crisp inner border
-                        val outline = nodeShape.createOutline(size, layoutDirection, this)
-                        drawOutline(
-                            outline = outline,
-                            color = borderColor,
-                            style = Stroke(width = strokePx * 2f)
-                        )
+                    else -> if (cachedOutline != null) {
+                        val clipOutlinePath = Path().apply { addOutline(cachedOutline) }
+                        clipPath(clipOutlinePath) {
+                            drawOutline(
+                                outline = cachedOutline,
+                                color = borderColor,
+                                style = Stroke(width = strokePx * 2f)
+                            )
+                        }
                     }
                 }
             }

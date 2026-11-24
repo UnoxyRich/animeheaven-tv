@@ -200,10 +200,10 @@ private fun KeyCap(
         onClick = onClick,
         modifier = modifier,
         shape = AhShape3,
-        containerColor = if (isPrimary) palette.crimson else palette.surfaceElevated,
-        focusedContainerColor = if (isPrimary) Color.White else palette.crimson,
-        unfocusedBorderColor = if (isPrimary) palette.crimson else palette.borderSubtle,
-        focusedBorderColor = if (isPrimary) palette.crimson else Color.White,
+        containerColor = if (isPrimary) Color.White else palette.surfaceElevated,
+        focusedContainerColor = if (isPrimary) palette.crimson else Color.White,
+        unfocusedBorderColor = if (isPrimary) Color.White else palette.borderSubtle,
+        focusedBorderColor = Color.White,
         borderWidth = 1.dp,
         focusedBorderWidth = 2.dp,
         focusScale = 1.07f
@@ -215,9 +215,9 @@ private fun KeyCap(
             Text(
                 text = label,
                 color = when {
-                    isPrimary && isFocused -> palette.crimson
-                    isPrimary -> Color.White
-                    isFocused -> Color.White
+                    isPrimary && isFocused -> Color.White
+                    isPrimary -> Color.Black
+                    isFocused -> Color.Black
                     else -> palette.textPrimary
                 },
                 fontSize = if (label.length > 2) 13.sp else 16.sp,

@@ -78,15 +78,15 @@ fun AnimeHeavenHeader(
         // Netflix-style Bold Condensed Crimson Monogram
         AhFocusableBox(
             onClick = onSelectHome,
-            shape = AhShape8,
+            shape = AhShape20,
             containerColor = Color.Transparent,
             focusedContainerColor = Color(0x26FFFFFF),
-            focusedBorderColor = Color.White,
-            focusedBorderWidth = 2.dp,
-            focusScale = 1.08f
+            focusedBorderColor = Color(0xCCFFFFFF),
+            focusedBorderWidth = 1.5.dp,
+            focusScale = 1.04f
         ) { _ ->
             Row(
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {

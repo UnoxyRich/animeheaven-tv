@@ -42,14 +42,14 @@ enum class AhThemeId(
     val cssKey: String,
     val subtitle: String
 ) {
-    DARK("Dark Crimson (Default)", "dark", "Pure OLED black #000000 • Crimson #DD0021"),
-    DARK_INDIGO("Midnight Indigo", "dark2", "Deep plum to midnight navy gradient"),
-    DARK_GRAPHITE("Graphite Slate", "dark3", "Charcoal metallic dark gradient"),
-    DARK_TEAL_PLUM("Teal Plum", "dark4", "Abyssal teal to dark plum gradient"),
-    DARK_CRIMSON_VELVET("Crimson Velvet", "dark5", "Deep maroon to dark plum gradient"),
-    DARK_MAGENTA("Magenta Dusk", "dark6", "Vibrant magenta to deep purple gradient"),
-    DARK_TWILIGHT("Steel Twilight", "dark7", "Slate blue to twilight indigo gradient"),
-    LIGHT("Classic Light", "light", "White canvas • GhostWhite cards • Crimson accent");
+    DARK("Cinema Dark", "dark", "Deep charcoal • Netflix Red"),
+    DARK_INDIGO("Midnight Indigo", "dark2", "Plum to midnight navy"),
+    DARK_GRAPHITE("Graphite Slate", "dark3", "Charcoal metallic dark"),
+    DARK_TEAL_PLUM("Teal Plum", "dark4", "Abyssal teal to plum"),
+    DARK_CRIMSON_VELVET("Crimson Velvet", "dark5", "Deep maroon to plum"),
+    DARK_MAGENTA("Magenta Dusk", "dark6", "Vibrant magenta to purple"),
+    DARK_TWILIGHT("Steel Twilight", "dark7", "Slate blue to indigo"),
+    LIGHT("Classic Light", "light", "White canvas • Crisp cards");
 
     companion object {
         fun fromCssKey(key: String?): AhThemeId =

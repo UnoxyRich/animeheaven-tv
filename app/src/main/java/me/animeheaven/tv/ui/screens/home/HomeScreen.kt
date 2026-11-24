@@ -15,10 +15,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.animeheaven.tv.data.model.ContinueWatchingItem
 import me.animeheaven.tv.data.model.FeedViewMode
@@ -80,6 +83,13 @@ fun HomeScreen(
                 )
             }
             feed != null -> {
+                val heroFocusRequester = remember { FocusRequester() }
+                LaunchedEffect(feed.banners.isNotEmpty()) {
+                    if (feed.banners.isNotEmpty()) {
+                        delay(120L)
+                        runCatching { heroFocusRequester.requestFocus() }
+                    }
+                }
                 val listState = rememberLazyListState(
                     prefetchStrategy = remember { LazyListPrefetchStrategy(nestedPrefetchItemCount = 4) }
                 )
@@ -90,14 +100,15 @@ fun HomeScreen(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = 6.dp, bottom = 16.dp)
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 16.dp)
                 ) {
                     if (feed.banners.isNotEmpty()) {
                         item(key = "hero_banner", contentType = "hero_banner") {
                             HeroBannerCarousel(
                                 banners = feed.banners,
                                 onBannerClick = onOpenAnime,
-                                onBannerFocused = viewModel::onCardFocused
+                                onBannerFocused = viewModel::onCardFocused,
+                                primaryFocusRequester = heroFocusRequester
                             )
                         }
                     }
