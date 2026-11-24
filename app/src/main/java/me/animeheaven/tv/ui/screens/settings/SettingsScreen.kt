@@ -34,6 +34,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -192,10 +194,15 @@ fun SettingsScreen(
                                             settingsStore.setTheme(theme)
                                             statusBanner = "Theme: ${theme.displayName}"
                                         },
-                                        modifier = Modifier.weight(1f),
+                                        modifier = Modifier.weight(1f)
+                                            .semantics { this.selected = selected }
+                                            .border(
+                                                width = if (selected) 2.dp else 1.dp,
+                                                color = if (selected) palette.crimson else palette.borderSubtle,
+                                                shape = AhShape3
+                                            ),
+                                        shape = AhShape3,
                                         containerColor = palette.surfaceElevated,
-                                        unfocusedBorderColor = if (selected) palette.crimson else palette.borderSubtle,
-                                        borderWidth = if (selected) 2.dp else 1.dp,
                                         focusedBorderWidth = 2.5.dp
                                     ) {
                                         Row(

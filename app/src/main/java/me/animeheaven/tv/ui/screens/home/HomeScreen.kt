@@ -1,6 +1,8 @@
 package me.animeheaven.tv.ui.screens.home
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -11,10 +13,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListPrefetchStrategy
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -38,6 +43,30 @@ import me.animeheaven.tv.ui.components.ScheduleGridCard
 import me.animeheaven.tv.ui.components.ScheduleListCard
 import me.animeheaven.tv.ui.components.SectionHeaderWithToggle
 import me.animeheaven.tv.ui.components.toGridRows
+
+// The default TV focus pivot scrolls even a visible CTA towards the top of the feed.
+@OptIn(ExperimentalFoundationApi::class)
+private object HomeBringIntoViewSpec : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = when {
+        offset >= 0 && offset + size <= containerSize -> 0f
+        offset < 0 && offset + size > containerSize -> 0f
+        offset < 0 -> offset
+        else -> offset + size - containerSize
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun HomeFeedColumn(state: LazyListState, content: LazyListScope.() -> Unit) {
+    CompositionLocalProvider(LocalBringIntoViewSpec provides HomeBringIntoViewSpec) {
+        LazyColumn(
+            state = state,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(top = 4.dp, bottom = 16.dp),
+            content = content
+        )
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -96,11 +125,7 @@ fun HomeScreen(
                     feed.scheduleItems.toGridRows(4) { it.id }
                 }
 
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = 4.dp, bottom = 16.dp)
-                ) {
+                HomeFeedColumn(state = listState) {
                     if (feed.banners.isNotEmpty()) {
                         item(key = "hero_banner", contentType = "hero_banner") {
                             HeroBannerCarousel(

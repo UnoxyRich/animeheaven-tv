@@ -3,6 +3,8 @@ package me.animeheaven.tv
 import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
@@ -28,7 +30,8 @@ class TvUiSmokeTest {
     fun fullAppWalkthroughCapturesScreenshots() {
         waitForText("Search", timeoutMs = 15_000L)
         composeRule.onNodeWithContentDescription("Settings & Themes").assertIsDisplayed()
-        settle(3_000L)
+        waitForText("Watch Now", timeoutMs = 25_000L)
+        settle(500L)
         saveScreenshot("01-tv-home")
 
         // New Releases tab
@@ -70,6 +73,8 @@ class TvUiSmokeTest {
 
         // Switch theme to Midnight Indigo
         composeRule.onNodeWithText("Midnight Indigo").performClick()
+        composeRule.onNodeWithText("Midnight Indigo").assertIsSelected()
+        composeRule.onNodeWithText("Cinema Dark").assertIsNotSelected()
         settle(1_200L)
         saveScreenshot("07-tv-settings-indigo")
 
