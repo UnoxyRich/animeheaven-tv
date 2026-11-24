@@ -80,10 +80,13 @@ jobs:
           disable-animations: true
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
+            adb shell rm -rf /data/local/tmp/ci-screenshots
+            adb shell mkdir -p /data/local/tmp/ci-screenshots
             ./gradlew connectedDebugAndroidTest --stacktrace
             mkdir -p screenshots
-            adb pull /sdcard/Android/data/me.animeheaven.tv/files/ci-screenshots/. screenshots/ || true
+            adb pull /data/local/tmp/ci-screenshots/. screenshots/
             ls -lh screenshots/
+            test "$(ls -1 screenshots/*.png | wc -l)" -ge 8
 
       - name: Upload TV App Screenshots
         if: always()
