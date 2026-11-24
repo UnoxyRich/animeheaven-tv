@@ -91,7 +91,7 @@ fun AnimeDetailScreen(
     LaunchedEffect(detail?.id) {
         if (detail != null && !hasFocusedPrimary) {
             delay(80L)
-            hasFocusedPrimary = runCatching { primaryFocusRequester.requestFocus() }.getOrDefault(false)
+            hasFocusedPrimary = runCatching { primaryFocusRequester.requestFocus() }.isSuccess
         }
     }
 
