@@ -151,6 +151,7 @@ class StreamingChunkBooster(
                                     mirrorUrl = mirror,
                                     chunkStart = start,
                                     chunkLen = len,
+                                    totalLength = totalLength,
                                     buffer = buffer
                                 )
                             }.getOrDefault(-1)
@@ -230,6 +231,7 @@ class StreamingChunkBooster(
                                         mirrorUrl = mirrorUrl,
                                         chunkStart = nextStart,
                                         chunkLen = len,
+                                        totalLength = session.totalLength,
                                         buffer = buffer
                                     )
                                 } catch (ce: CancellationException) {
@@ -355,6 +357,7 @@ class StreamingChunkBooster(
         mirrorUrl: String,
         chunkStart: Long,
         chunkLen: Long,
+        totalLength: Long,
         buffer: ByteArray
     ): Int {
         if (isChunkCached(cacheKey, chunkStart, chunkLen)) return 0
@@ -375,7 +378,8 @@ class StreamingChunkBooster(
             videoHttpClient.readResponse(req) { resp ->
                 if (!isValidChunkResponse(
                         resp.code, resp.header("Content-Range"), resp.header("Content-Type"),
-                        resp.header("Content-Encoding"), chunkStart, rangeEnd
+                        resp.header("Content-Encoding"), chunkStart, rangeEnd, totalLength,
+                        resp.header("Content-Length")?.toLongOrNull()
                     )
                 ) {
                     throw IOException("Invalid HTTP ${resp.code} response for range $chunkStart-$rangeEnd")
@@ -397,41 +401,65 @@ class StreamingChunkBooster(
         val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
         mirrorHealthTracker?.recordChunkThroughput(mirrorUrl, totalRead.toLong(), elapsedMs)
 
-        if (isChunkCached(cacheKey, chunkStart, totalRead.toLong())) return totalRead
-
-        val uri = Uri.parse(cacheKey)
-        val dataSpec = DataSpec.Builder()
-            .setUri(uri)
-            .setKey(cacheKey)
-            .setPosition(chunkStart)
-            .setLength(totalRead.toLong())
-            .build()
-
-        val sink = cacheSinkFactory.createDataSink()
-        sink.open(dataSpec)
-        try {
-            sink.write(buffer, 0, totalRead)
-        } finally {
-            sink.close()
-        }
+        if (!commitValidatedChunk(cacheKey, chunkStart, buffer, totalRead)) delay(120L)
         return totalRead
+    }
+
+    internal suspend fun commitValidatedChunk(cacheKey: String, chunkStart: Long, buffer: ByteArray, bytes: Int): Boolean {
+        val end = chunkStart + bytes
+        var position = chunkStart
+        while (position < end) {
+            currentCoroutineContext().ensureActive()
+            // Download first, then lock only the missing span while committing. If Media3
+            // owns it already, leave that span to the player instead of writing over it.
+            val span = simpleCache.startReadWriteNonBlocking(cacheKey, position, end - position)
+                ?: return false
+            if (span.isCached) {
+                position = minOf(end, span.position + span.length)
+                continue
+            }
+            try {
+                val length = if (span.isOpenEnded) end - position else minOf(span.length, end - position)
+                val dataSpec = DataSpec.Builder()
+                    .setUri(Uri.parse(cacheKey))
+                    .setKey(cacheKey)
+                    .setPosition(position)
+                    .setLength(length)
+                    .build()
+                val sink = cacheSinkFactory.createDataSink()
+                try {
+                    sink.open(dataSpec)
+                    sink.write(buffer, (position - chunkStart).toInt(), length.toInt())
+                } finally {
+                    sink.close()
+                }
+                position += length
+            } finally {
+                simpleCache.releaseHoleSpan(span)
+            }
+        }
+        return true
     }
 
     companion object {
         private val CONTENT_RANGE = Regex("""bytes (\d+)-(\d+)/(\d+)""", RegexOption.IGNORE_CASE)
 
         internal fun isValidChunkResponse(
-            code: Int, range: String?, type: String?, encoding: String?, start: Long, end: Long
+            code: Int, range: String?, type: String?, encoding: String?, start: Long, end: Long,
+            expectedTotal: Long? = null, contentLength: Long? = null
         ): Boolean {
             val mime = type.orEmpty().substringBefore(';').trim().lowercase()
             if (mime.startsWith("text/") || "html" in mime || "json" in mime ||
                 (encoding != null && !encoding.equals("identity", ignoreCase = true))
             ) return false
-            if (code == 200) return start == 0L && range == null
+            if (code == 200) return start == 0L && range == null &&
+                (expectedTotal == null || contentLength == expectedTotal)
             if (code != 206) return false
             val fields = range?.let(CONTENT_RANGE::matchEntire)?.groupValues ?: return false
-            return fields[1].toLongOrNull() == start && fields[2].toLongOrNull() == end &&
-                (fields[3].toLongOrNull() ?: 0L) > end
+            val total = fields[3].toLongOrNull() ?: return false
+            return fields[1].toLongOrNull() == start && fields[2].toLongOrNull() == end && total > end &&
+                (expectedTotal == null || expectedTotal == total) &&
+                (contentLength == null || contentLength == end - start + 1L)
         }
 
         const val CHUNK_SIZE_BYTES = 512L * 1024L

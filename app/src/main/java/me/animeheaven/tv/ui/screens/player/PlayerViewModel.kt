@@ -84,6 +84,7 @@ class PlayerViewModel(
 
     private var skipTimesJob: Job? = null
     private var loadEpisodeJob: Job? = null
+    private var requestedEpisodeKey = initialEpisodeKey
     private var attemptedFreshGate: Boolean = false
     private var mirrorAttemptStartedAtMs: Long = 0L
     private var hasRecordedStartForAttempt: Boolean = false
@@ -103,6 +104,7 @@ class PlayerViewModel(
         forceRefreshGate: Boolean = false,
         resumeOverrideMs: Long? = null
     ) {
+        requestedEpisodeKey = episodeKey
         val currentState = _uiState.value
         attemptedFreshGate = forceRefreshGate
         hasRecordedStartForAttempt = false
@@ -364,8 +366,7 @@ class PlayerViewModel(
     }
 
     fun retryCurrentEpisode() {
-        val key = _uiState.value.stream?.episodeKey ?: return
-        loadEpisode(key, forceRefreshGate = true)
+        loadEpisode(requestedEpisodeKey, forceRefreshGate = true)
     }
 
     fun persistProgress(
