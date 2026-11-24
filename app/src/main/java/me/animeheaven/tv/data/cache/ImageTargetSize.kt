@@ -9,7 +9,7 @@ enum class ImageTargetSize(val widthPx: Int, val heightPx: Int) {
     HERO_BANNER(1280, 360),
     DETAIL_POSTER(360, 540),
     CONTINUE_CARD(500, 280),
-    POPULAR_CARD(360, 320),
+    POPULAR_CARD(280, 390),
     STANDARD_CARD(420, 236),
     SEARCH_THUMB(256, 144)
 }

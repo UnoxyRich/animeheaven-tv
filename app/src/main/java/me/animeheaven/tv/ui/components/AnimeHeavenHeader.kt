@@ -61,9 +61,21 @@ fun AnimeHeavenHeader(
 ) {
     val palette = LocalAhPalette.current
     val topBarScrim = if (palette.isLight) {
-        Brush.verticalGradient(listOf(palette.background, palette.background.copy(alpha = 0.85f)))
+        Brush.verticalGradient(
+            listOf(
+                palette.background.copy(alpha = 0.96f),
+                palette.background.copy(alpha = 0.80f),
+                Color.Transparent
+            )
+        )
     } else {
-        Brush.verticalGradient(listOf(Color(0xE60B0B0B), Color(0x880B0B0B), Color.Transparent))
+        Brush.verticalGradient(
+            listOf(
+                palette.background.copy(alpha = 0.92f),
+                palette.background.copy(alpha = 0.55f),
+                Color.Transparent
+            )
+        )
     }
 
     Row(
@@ -75,36 +87,28 @@ fun AnimeHeavenHeader(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Netflix-style Bold Condensed Crimson Monogram
-        AhFocusableBox(
-            onClick = onSelectHome,
-            shape = AhShape20,
-            containerColor = Color.Transparent,
-            focusedContainerColor = Color(0x26FFFFFF),
-            focusedBorderColor = Color(0xCCFFFFFF),
-            focusedBorderWidth = 1.5.dp,
-            focusScale = 1.04f
-        ) { _ ->
-            Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = "A",
-                    color = palette.crimson,
-                    fontSize = 30.sp,
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = (-1).sp
-                )
-                Text(
-                    text = "HEAVEN",
-                    color = palette.textPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = 2.2.sp
-                )
-            }
+        // Netflix-style Bold Condensed Crimson Monogram (decorative brand mark; Schedule navigates Home)
+        Row(
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "A",
+                color = palette.crimson,
+                fontSize = 30.sp,
+                lineHeight = 32.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = (-1).sp
+            )
+            Text(
+                text = "HEAVEN",
+                color = palette.textPrimary,
+                fontSize = 13.sp,
+                lineHeight = 16.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 2.2.sp
+            )
         }
 
         Spacer(modifier = Modifier.weight(1f))
@@ -118,7 +122,7 @@ fun AnimeHeavenHeader(
                 )
                 .border(
                     width = 1.dp,
-                    color = if (palette.isLight) palette.borderSubtle else Color(0x26FFFFFF),
+                    color = if (palette.isLight) palette.borderSubtle else palette.chipBorder,
                     shape = AhShape20
                 )
                 .padding(horizontal = 6.dp, vertical = 4.dp),
@@ -130,12 +134,12 @@ fun AnimeHeavenHeader(
                 onClick = onSelectSearch,
                 shape = AhShape20,
                 containerColor = if (activeDestination == HeaderDestination.SEARCH) {
-                    Color(0x29FFFFFF)
+                    palette.chipContainer
                 } else {
                     Color.Transparent
                 },
-                focusedContainerColor = Color.White,
-                focusedBorderColor = Color.White,
+                focusedContainerColor = palette.focusContainer,
+                focusedBorderColor = palette.focusBorder,
                 focusedBorderWidth = 2.dp,
                 focusScale = 1.05f
             ) { isFocused ->
@@ -147,12 +151,12 @@ fun AnimeHeavenHeader(
                     Icon(
                         imageVector = Icons.Rounded.Search,
                         contentDescription = "Search",
-                        tint = if (isFocused) Color.Black else palette.textPrimary,
+                        tint = if (isFocused) palette.onFocusContainer else palette.textPrimary,
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
                         text = "Search",
-                        color = if (isFocused) Color.Black else palette.textSecondary,
+                        color = if (isFocused) palette.onFocusContainer else palette.textSecondary,
                         fontSize = 14.sp,
                         fontWeight = if (isFocused) FontWeight.Bold else FontWeight.SemiBold,
                         maxLines = 1
@@ -203,16 +207,18 @@ fun AnimeHeavenHeader(
             shape = CircleShape,
             containerColor = if (activeDestination == HeaderDestination.SETTINGS) {
                 palette.crimson
+            } else if (palette.isLight) {
+                palette.surfaceElevated
             } else {
                 Color(0xFF262626)
             },
-            focusedContainerColor = Color.White,
+            focusedContainerColor = palette.focusContainer,
             unfocusedBorderColor = if (activeDestination == HeaderDestination.SETTINGS) {
-                Color.White
+                palette.crimson
             } else {
-                Color(0x38FFFFFF)
+                palette.chipBorder
             },
-            focusedBorderColor = Color.White,
+            focusedBorderColor = palette.focusBorder,
             borderWidth = 1.5.dp,
             focusedBorderWidth = 2.5.dp,
             focusScale = 1.1f
@@ -225,8 +231,9 @@ fun AnimeHeavenHeader(
                     imageVector = AhIcons.Tune,
                     contentDescription = "Settings & Themes",
                     tint = when {
-                        isFocused -> Color.Black
-                        else -> Color.White
+                        isFocused -> palette.onFocusContainer
+                        activeDestination == HeaderDestination.SETTINGS -> Color.White
+                        else -> palette.textPrimary
                     },
                     modifier = Modifier.size(20.dp)
                 )
@@ -247,8 +254,8 @@ private fun HeaderNavTab(
         onClick = onClick,
         shape = AhShape20,
         containerColor = Color.Transparent,
-        focusedContainerColor = Color.White,
-        focusedBorderColor = Color.White,
+        focusedContainerColor = palette.focusContainer,
+        focusedBorderColor = palette.focusBorder,
         focusedBorderWidth = 2.dp,
         focusScale = 1.05f
     ) { isFocused ->
@@ -259,7 +266,7 @@ private fun HeaderNavTab(
             Text(
                 text = label,
                 color = when {
-                    isFocused -> Color.Black
+                    isFocused -> palette.onFocusContainer
                     selected -> palette.textPrimary
                     else -> palette.textSecondary
                 },

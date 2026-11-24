@@ -22,7 +22,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.unit.dp
@@ -112,10 +114,15 @@ fun HomeScreen(
             }
             feed != null -> {
                 val heroFocusRequester = remember { FocusRequester() }
+                var isHeroPrimaryFocused by remember { mutableStateOf(false) }
                 LaunchedEffect(feed.banners.isNotEmpty()) {
                     if (feed.banners.isNotEmpty()) {
-                        delay(120L)
-                        runCatching { heroFocusRequester.requestFocus() }
+                        repeat(8) {
+                            if (isHeroPrimaryFocused) return@LaunchedEffect
+                            delay(120L)
+                            if (isHeroPrimaryFocused) return@LaunchedEffect
+                            runCatching { heroFocusRequester.requestFocus() }
+                        }
                     }
                 }
                 val listState = rememberLazyListState(
@@ -132,7 +139,10 @@ fun HomeScreen(
                                 banners = feed.banners,
                                 onBannerClick = onOpenAnime,
                                 onBannerFocused = viewModel::onCardFocused,
-                                primaryFocusRequester = heroFocusRequester
+                                primaryFocusRequester = heroFocusRequester,
+                                onPrimaryFocusChanged = { focused ->
+                                    if (focused) isHeroPrimaryFocused = true
+                                }
                             )
                         }
                     }

@@ -33,6 +33,7 @@ data class AhThemePalette(
     val themeId: AhThemeId,
     val background: Color,
     val backgroundBrush: Brush?,
+    val swatchBrush: Brush?,
     val surface: Color,
     val surfaceElevated: Color,
     val surfaceFocused: Color,
@@ -43,6 +44,11 @@ data class AhThemePalette(
     val textMuted: Color,
     val borderSubtle: Color,
     val positiveGreen: Color,
+    val focusBorder: Color,
+    val focusContainer: Color,
+    val onFocusContainer: Color,
+    val chipContainer: Color,
+    val chipBorder: Color,
     val isLight: Boolean
 )
 
@@ -91,6 +97,11 @@ private fun buildPaletteFor(themeId: AhThemeId): AhThemePalette {
             backgroundBrush = Brush.verticalGradient(
                 colors = listOf(Color(0xFF1A090B), Color(0xFF0B0B0B), Color(0xFF0B0B0B))
             ),
+            swatchBrush = Brush.linearGradient(
+                colors = listOf(Color(0xFF280A0E), Color(0xFF0B0B0B)),
+                start = Offset.Zero,
+                end = Offset.Infinite
+            ),
             surface = Color(0xFF141414),
             surfaceElevated = Color(0xFF1F1F1F),
             surfaceFocused = Color(0xFF2B2B2B),
@@ -101,6 +112,11 @@ private fun buildPaletteFor(themeId: AhThemeId): AhThemePalette {
             textMuted = Color(0xFF8C8C8C),
             borderSubtle = Color(0xFF2A2A2A),
             positiveGreen = green,
+            focusBorder = Color.White,
+            focusContainer = Color.White,
+            onFocusContainer = Color.Black,
+            chipContainer = Color(0x26FFFFFF),
+            chipBorder = Color(0x38FFFFFF),
             isLight = false
         )
         AhThemeId.DARK_INDIGO -> gradientDarkPalette(
@@ -125,6 +141,7 @@ private fun buildPaletteFor(themeId: AhThemeId): AhThemePalette {
             themeId = themeId,
             background = Color(0xFFFFFFFF),
             backgroundBrush = null,
+            swatchBrush = null,
             surface = Color(0xFFF3F3F8),
             surfaceElevated = Color(0xFFE7E7EE),
             surfaceFocused = Color(0xFFE0E0EA),
@@ -135,6 +152,11 @@ private fun buildPaletteFor(themeId: AhThemeId): AhThemePalette {
             textMuted = Color(0xFF666666),
             borderSubtle = Color(0xFFD0D0DC),
             positiveGreen = Color(0xFF158A4A),
+            focusBorder = Color(0xFF1A1A1A),
+            focusContainer = Color(0xFF1A1A1A),
+            onFocusContainer = Color.White,
+            chipContainer = Color(0x18000000),
+            chipBorder = Color(0x30000000),
             isLight = true
         )
     }
@@ -155,6 +177,11 @@ private fun gradientDarkPalette(
         start = Offset.Zero,
         end = Offset(1920f, 300f)
     ),
+    swatchBrush = Brush.linearGradient(
+        colors = listOf(start, end),
+        start = Offset.Zero,
+        end = Offset.Infinite
+    ),
     surface = Color(0x99000000),
     surfaceElevated = Color(0xBF0E0E0E),
     surfaceFocused = Color(0xE01A1A1A),
@@ -165,6 +192,11 @@ private fun gradientDarkPalette(
     textMuted = Color(0xFF9E9E9E),
     borderSubtle = Color(0x44FFFFFF),
     positiveGreen = green,
+    focusBorder = Color.White,
+    focusContainer = Color.White,
+    onFocusContainer = Color.Black,
+    chipContainer = Color(0x26FFFFFF),
+    chipBorder = Color(0x38FFFFFF),
     isLight = false
 )
 

@@ -15,6 +15,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.io.FileOutputStream
+import me.animeheaven.tv.ui.components.AhImageLoadTracker
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -31,17 +32,24 @@ class TvUiSmokeTest {
         waitForText("Search", timeoutMs = 15_000L)
         composeRule.onNodeWithContentDescription("Settings & Themes").assertIsDisplayed()
         waitForText("Watch Now", timeoutMs = 25_000L)
-        settle(500L)
+        waitForImagesLoaded(minCount = 5, timeoutMs = 15_000L)
+        settle(800L)
         saveScreenshot("01-tv-home")
 
         // New Releases tab
+        val imagesBeforeNew = AhImageLoadTracker.loadedCount.get()
         composeRule.onAllNodesWithText("New").onFirst().performClick()
-        settle(2_500L)
+        runCatching { waitForText("New Episodes", timeoutMs = 12_000L) }
+        waitForImagesLoaded(minCount = imagesBeforeNew + 2, timeoutMs = 10_000L)
+        settle(1_200L)
         saveScreenshot("02-tv-new")
 
         // Popular tab
+        val imagesBeforePopular = AhImageLoadTracker.loadedCount.get()
         composeRule.onAllNodesWithText("Popular").onFirst().performClick()
-        settle(2_500L)
+        runCatching { waitForText("Popular Today", timeoutMs = 12_000L) }
+        waitForImagesLoaded(minCount = imagesBeforePopular + 2, timeoutMs = 10_000L)
+        settle(1_200L)
         saveScreenshot("03-tv-popular")
 
         // My Bookmarks tab
@@ -52,10 +60,18 @@ class TvUiSmokeTest {
         // Search with custom TV keyboard
         composeRule.onAllNodesWithText("Search").onFirst().performClick()
         waitForText("Q", timeoutMs = 10_000L)
-        for (key in listOf("F", "R", "I", "E")) {
+        val imagesBeforeSearch = AhImageLoadTracker.loadedCount.get()
+        for (key in listOf("F", "R", "I", "E", "R", "E", "N")) {
             composeRule.onAllNodesWithText(key).onFirst().performClick()
         }
-        settle(2_500L)
+        runCatching {
+            composeRule.waitUntil(timeoutMillis = 15_000L) {
+                composeRule.onAllNodesWithText("Frieren", substring = true, ignoreCase = true)
+                    .fetchSemanticsNodes().size >= 2
+            }
+        }
+        waitForImagesLoaded(minCount = imagesBeforeSearch + 2, timeoutMs = 10_000L)
+        settle(800L)
         saveScreenshot("05-tv-search-keyboard")
 
         // Return from Search to Schedule
@@ -64,7 +80,7 @@ class TvUiSmokeTest {
         composeRule.onAllNodesWithText("Schedule").onFirst().performClick()
         settle(1_000L)
 
-        // Settings & Themes (default OLED Dark)
+        // Settings & Themes (default Cinema Dark)
         composeRule.onNodeWithContentDescription("Settings & Themes").performClick()
         waitForText("Settings & Themes", timeoutMs = 10_000L)
         composeRule.onNodeWithText("Settings & Themes").assertIsDisplayed()
@@ -75,7 +91,7 @@ class TvUiSmokeTest {
         composeRule.onNodeWithText("Midnight Indigo").performClick()
         composeRule.onNodeWithText("Midnight Indigo").assertIsSelected()
         composeRule.onNodeWithText("Cinema Dark").assertIsNotSelected()
-        settle(1_200L)
+        settle(2_000L)
         saveScreenshot("07-tv-settings-indigo")
 
         // Return to Home in Midnight Indigo
@@ -83,11 +99,44 @@ class TvUiSmokeTest {
         waitForText("Search", timeoutMs = 10_000L)
         settle(1_500L)
         saveScreenshot("08-tv-home-indigo")
+
+        // Bonus 1: Classic Light theme verification in Settings
+        composeRule.onNodeWithContentDescription("Settings & Themes").performClick()
+        waitForText("Classic Light", timeoutMs = 10_000L)
+        composeRule.onNodeWithText("Classic Light").performClick()
+        composeRule.onNodeWithText("Classic Light").assertIsSelected()
+        settle(2_000L)
+        saveScreenshot("09-tv-settings-light")
+
+        // Bonus 2: Anime Detail screen verification (hero framing + Classic Light contrast)
+        composeRule.onNodeWithContentDescription("Back").performClick()
+        waitForText("More Info", timeoutMs = 10_000L)
+        settle(600L)
+        val imagesBeforeDetail = AhImageLoadTracker.loadedCount.get()
+        composeRule.onAllNodesWithText("More Info").onFirst().performClick()
+        waitForTextSubstring("My List", timeoutMs = 20_000L)
+        waitForImagesLoaded(minCount = imagesBeforeDetail + 2, timeoutMs = 10_000L)
+        settle(800L)
+        saveScreenshot("10-tv-detail")
     }
 
     private fun waitForText(text: String, timeoutMs: Long) {
         composeRule.waitUntil(timeoutMillis = timeoutMs) {
             composeRule.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    private fun waitForTextSubstring(text: String, timeoutMs: Long) {
+        composeRule.waitUntil(timeoutMillis = timeoutMs) {
+            composeRule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    private fun waitForImagesLoaded(minCount: Int, timeoutMs: Long) {
+        runCatching {
+            composeRule.waitUntil(timeoutMillis = timeoutMs) {
+                AhImageLoadTracker.loadedCount.get() >= minCount
+            }
         }
     }
 

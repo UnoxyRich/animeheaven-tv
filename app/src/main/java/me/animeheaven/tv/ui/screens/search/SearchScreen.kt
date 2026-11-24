@@ -43,6 +43,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -68,10 +69,7 @@ import me.animeheaven.tv.ui.components.AhIcons
 import me.animeheaven.tv.ui.components.AhOverscanHorizontal
 import me.animeheaven.tv.ui.components.AhOverscanVertical
 import me.animeheaven.tv.ui.components.AhShape16
-import me.animeheaven.tv.ui.components.AhShape2
-import me.animeheaven.tv.ui.components.AhShape3
 import me.animeheaven.tv.ui.components.AhShape4
-import me.animeheaven.tv.ui.components.AhStaticFocusableBox
 import me.animeheaven.tv.ui.components.SimilarShowCard
 import me.animeheaven.tv.ui.components.TvCustomKeyboard
 import me.animeheaven.tv.ui.theme.LocalAhPalette
@@ -140,14 +138,15 @@ fun SearchScreen(
                 modifier = Modifier.size(42.dp),
                 shape = AhShape4,
                 containerColor = palette.surfaceElevated,
-                focusedContainerColor = Color.White,
-                focusedBorderColor = Color.White
+                focusedContainerColor = palette.focusContainer,
+                unfocusedBorderColor = palette.borderSubtle,
+                focusedBorderColor = palette.focusBorder
             ) { isFocused ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                         contentDescription = "Back",
-                        tint = if (isFocused) Color.Black else Color.White
+                        tint = if (isFocused) palette.onFocusContainer else palette.textPrimary
                     )
                 }
             }
@@ -157,7 +156,7 @@ fun SearchScreen(
                 modifier = Modifier
                     .weight(1f)
                     .height(44.dp)
-                    .border(1.5.dp, Color(0x38FFFFFF), AhShape4)
+                    .border(1.5.dp, palette.chipBorder, AhShape4)
                     .background(if (palette.isLight) Color.White else Color(0xFF0E0E0E), AhShape4)
                     .padding(horizontal = 14.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -198,7 +197,7 @@ fun SearchScreen(
             }
 
             if (state.query.isNotEmpty()) {
-                AhStaticFocusableBox(
+                AhFocusableBox(
                     onClick = {
                         viewModel.clearQuery()
                         runCatching { firstKeyFocusRequester.requestFocus() }
@@ -206,13 +205,14 @@ fun SearchScreen(
                     modifier = Modifier.size(42.dp),
                     containerColor = palette.surfaceElevated,
                     focusedContainerColor = palette.crimson,
-                    focusedBorderColor = Color.White
-                ) {
+                    unfocusedBorderColor = palette.borderSubtle,
+                    focusedBorderColor = palette.focusBorder
+                ) { isFocused ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = Icons.Rounded.Close,
                             contentDescription = "Clear Query",
-                            tint = Color.White
+                            tint = if (isFocused) Color.White else palette.textPrimary
                         )
                     }
                 }
@@ -222,7 +222,7 @@ fun SearchScreen(
                 onClick = viewModel::submitFullSearch,
                 modifier = Modifier.height(42.dp),
                 containerColor = palette.crimson,
-                focusedContainerColor = Color.White,
+                focusedContainerColor = palette.focusContainer,
                 focusedBorderColor = palette.crimson
             ) { isFocused ->
                 Row(
@@ -233,12 +233,12 @@ fun SearchScreen(
                     Icon(
                         imageVector = Icons.Rounded.Search,
                         contentDescription = "Search",
-                        tint = if (isFocused) palette.crimson else Color.White,
+                        tint = if (isFocused) palette.onFocusContainer else Color.White,
                         modifier = Modifier.size(20.dp)
                     )
                     Text(
                         text = "Search",
-                        color = if (isFocused) palette.crimson else Color.White,
+                        color = if (isFocused) palette.onFocusContainer else Color.White,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -309,7 +309,7 @@ fun SearchScreen(
                                     containerColor = palette.surfaceElevated,
                                     focusedContainerColor = palette.crimson,
                                     unfocusedBorderColor = palette.borderSubtle,
-                                    focusedBorderColor = Color.White
+                                    focusedBorderColor = palette.focusBorder
                                 ) { isFocused ->
                                     Text(
                                         text = recent,
@@ -357,15 +357,16 @@ fun SearchScreen(
                         modifier = Modifier.weight(1f)
                     )
                     if (state.isFullSearchMode && state.fastResults.isNotEmpty()) {
-                        AhStaticFocusableBox(
+                        AhFocusableBox(
                             onClick = viewModel::showLiveSuggestions,
                             containerColor = palette.surfaceElevated,
                             focusedContainerColor = palette.crimson,
-                            focusedBorderColor = Color.White
-                        ) {
+                            unfocusedBorderColor = palette.borderSubtle,
+                            focusedBorderColor = palette.focusBorder
+                        ) { isFocused ->
                             Text(
                                 text = "Live List",
-                                color = Color.White,
+                                color = if (isFocused) Color.White else palette.textPrimary,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
@@ -432,6 +433,28 @@ fun SearchScreen(
                             "Use the custom D-pad keyboard on the left or your remote keys.\nLive suggestions appear after 2 characters."
                         )
                     }
+                    state.fastResults.isEmpty() && state.isLoading -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    color = palette.crimson,
+                                    strokeWidth = 2.5.dp,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                Text(
+                                    text = "Searching live matches...",
+                                    color = palette.textMuted,
+                                    fontSize = 14.sp
+                                )
+                            }
+                        }
+                    }
                     state.fastResults.isEmpty() && !state.isLoading -> {
                         EmptySearchMessage("No instant matches. Press SEARCH for full site search.")
                     }
@@ -439,6 +462,9 @@ fun SearchScreen(
                         val fastListState = rememberLazyListState(
                             prefetchStrategy = remember { LazyListPrefetchStrategy(nestedPrefetchItemCount = 4) }
                         )
+                        LaunchedEffect(state.query, state.fastResults.firstOrNull()?.animeId) {
+                            fastListState.scrollToItem(0)
+                        }
                         LazyColumn(
                             state = fastListState,
                             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -455,6 +481,8 @@ fun SearchScreen(
                                         .fillMaxWidth()
                                         .focusProperties { left = firstKeyFocusRequester },
                                     containerColor = palette.surfaceElevated,
+                                    unfocusedBorderColor = palette.borderSubtle,
+                                    focusedBorderColor = palette.focusBorder,
                                     focusScale = 1.015f,
                                     onFocusStateChanged = { focused ->
                                         if (focused) {
@@ -483,10 +511,12 @@ fun SearchScreen(
                                             modifier = Modifier
                                                 .width(128.dp)
                                                 .aspectRatio(16f / 9f)
+                                                .clip(AhShape4)
+                                                .background(palette.surfaceElevated)
                                         )
                                         Text(
                                             text = item.title,
-                                            color = if (isFocused) Color.White else palette.textSecondary,
+                                            color = if (isFocused) palette.textPrimary else palette.textSecondary,
                                             fontSize = 17.sp,
                                             fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium,
                                             maxLines = 2,
@@ -497,28 +527,30 @@ fun SearchScreen(
                                 }
                             }
 
-                            item(key = "show_all_btn", contentType = "show_all_btn") {
-                                AhFocusableBox(
-                                    onClick = viewModel::submitFullSearch,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .focusProperties { left = firstKeyFocusRequester },
-                                    containerColor = palette.crimson,
-                                    focusedContainerColor = Color.White,
-                                    focusedBorderColor = palette.crimson
-                                ) { isFocused ->
-                                    Box(
+                            if (state.fastResults.isNotEmpty()) {
+                                item(key = "show_all_btn", contentType = "show_all_btn") {
+                                    AhFocusableBox(
+                                        onClick = viewModel::submitFullSearch,
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(vertical = 10.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "Show all results for \"${state.query.trim()}\"",
-                                            color = if (isFocused) palette.crimson else Color.White,
-                                            fontSize = 15.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                                            .focusProperties { left = firstKeyFocusRequester },
+                                        containerColor = palette.crimson,
+                                        focusedContainerColor = palette.focusContainer,
+                                        focusedBorderColor = palette.crimson
+                                    ) { isFocused ->
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 10.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "Show all results for \"${state.query.trim()}\"",
+                                                color = if (isFocused) palette.onFocusContainer else Color.White,
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
                                     }
                                 }
                             }

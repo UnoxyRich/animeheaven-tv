@@ -67,6 +67,7 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.allowRgb565
 import coil3.size.Precision
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.delay
 import me.animeheaven.tv.data.cache.ImageTargetSize
 import me.animeheaven.tv.data.model.AnimeCard
@@ -121,6 +122,10 @@ fun <T> List<T>.toGridRows(columns: Int, keyOf: (T) -> String): List<GridRow<T>>
     return rows
 }
 
+object AhImageLoadTracker {
+    val loadedCount = AtomicInteger(0)
+}
+
 @Composable
 fun AhCoverImage(
     url: String,
@@ -129,6 +134,7 @@ fun AhCoverImage(
     targetSize: ImageTargetSize = ImageTargetSize.STANDARD_CARD
 ) {
     val context = LocalContext.current
+    val palette = LocalAhPalette.current
     val request = remember(url, targetSize) {
         ImageRequest.Builder(context)
             .data(url)
@@ -142,7 +148,8 @@ fun AhCoverImage(
         contentDescription = contentDescription,
         contentScale = ContentScale.Crop,
         filterQuality = FilterQuality.Medium,
-        modifier = modifier
+        onSuccess = { AhImageLoadTracker.loadedCount.incrementAndGet() },
+        modifier = modifier.background(palette.surfaceElevated)
     )
 }
 
@@ -157,6 +164,7 @@ fun HeroBannerCarousel(
     onBannerClick: (String) -> Unit,
     onBannerFocused: ((animeId: String, imageUrl: String) -> Unit)? = null,
     primaryFocusRequester: FocusRequester? = null,
+    onPrimaryFocusChanged: ((Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     if (banners.isEmpty()) return
@@ -185,12 +193,12 @@ fun HeroBannerCarousel(
             .onFocusChanged { isCarouselFocused = it.hasFocus }
             .focusGroup()
             .padding(horizontal = AhOverscanHorizontal)
-            .height(266.dp)
+            .height(222.dp)
             .clip(AhShape12)
             .background(
                 Brush.linearGradient(listOf(Color(0xFF280A0E), Color(0xFF141414)))
             )
-            .border(1.dp, Color(0x26FFFFFF), AhShape12)
+            .border(1.dp, if (palette.isLight) palette.borderSubtle else Color(0x26FFFFFF), AhShape12)
     ) {
         // Full-bleed crossfading backdrop
         Crossfade(
@@ -215,8 +223,8 @@ fun HeroBannerCarousel(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .fillMaxWidth(0.64f)
-                .padding(horizontal = 28.dp, vertical = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(horizontal = 24.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             // Netflix-style "A  S E R I E S" eyebrow
             Row(
@@ -226,13 +234,15 @@ fun HeroBannerCarousel(
                 Text(
                     text = "A",
                     color = palette.crimson,
-                    fontSize = 18.sp,
+                    fontSize = 16.sp,
+                    lineHeight = 18.sp,
                     fontWeight = FontWeight.Black
                 )
                 Text(
                     text = "S E R I E S",
                     color = Color(0xFFD9D9D9),
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 2.4.sp
                 )
@@ -246,6 +256,7 @@ fun HeroBannerCarousel(
                         text = "#${safeIndex + 1} FEATURED",
                         color = Color.White,
                         fontSize = 10.sp,
+                        lineHeight = 12.sp,
                         fontWeight = FontWeight.ExtraBold,
                         letterSpacing = 0.8.sp
                     )
@@ -255,8 +266,8 @@ fun HeroBannerCarousel(
             Text(
                 text = current.title,
                 color = Color.White,
-                fontSize = 30.sp,
-                lineHeight = 34.sp,
+                fontSize = 26.sp,
+                lineHeight = 30.sp,
                 fontWeight = FontWeight.ExtraBold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
@@ -270,14 +281,16 @@ fun HeroBannerCarousel(
                 Text(
                     text = "Trending Now",
                     color = palette.positiveGreen,
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
+                    lineHeight = 15.sp,
                     fontWeight = FontWeight.Bold
                 )
-                Text(text = "•", color = Color(0x88FFFFFF), fontSize = 13.sp)
+                Text(text = "•", color = Color(0x88FFFFFF), fontSize = 12.sp, lineHeight = 15.sp)
                 Text(
                     text = "Subbed Anime",
                     color = Color(0xFFE0E0E0),
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
+                    lineHeight = 15.sp,
                     fontWeight = FontWeight.Medium
                 )
                 Box(
@@ -289,6 +302,7 @@ fun HeroBannerCarousel(
                         text = "HD",
                         color = Color(0xFFE0E0E0),
                         fontSize = 10.sp,
+                        lineHeight = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -315,11 +329,12 @@ fun HeroBannerCarousel(
                     focusedBorderWidth = 3.dp,
                     focusScale = 1.06f,
                     onFocusStateChanged = { focused ->
+                        onPrimaryFocusChanged?.invoke(focused)
                         if (focused) onBannerFocused?.invoke(current.animeId, current.bannerImageUrl)
                     }
                 ) { _ ->
                     Row(
-                        modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp),
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
@@ -327,12 +342,12 @@ fun HeroBannerCarousel(
                             imageVector = Icons.Rounded.PlayArrow,
                             contentDescription = null,
                             tint = Color.Black,
-                            modifier = Modifier.size(24.dp)
+                            modifier = Modifier.size(22.dp)
                         )
                         Text(
                             text = "Watch Now",
                             color = Color.Black,
-                            fontSize = 16.sp,
+                            fontSize = 15.sp,
                             fontWeight = FontWeight.ExtraBold
                         )
                     }
@@ -354,9 +369,9 @@ fun HeroBannerCarousel(
                     Text(
                         text = "More Info",
                         color = Color.White,
-                        fontSize = 15.sp,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 11.dp)
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp)
                     )
                 }
             }
@@ -367,7 +382,7 @@ fun HeroBannerCarousel(
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(horizontal = 24.dp, vertical = 22.dp),
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -473,8 +488,8 @@ fun ContinueWatchingRow(
                     modifier = Modifier.width(268.dp),
                     shape = AhShape10,
                     containerColor = palette.surface,
-                    unfocusedBorderColor = Color(0x1FFFFFFF),
-                    focusedBorderColor = Color.White,
+                    unfocusedBorderColor = if (palette.isLight) palette.borderSubtle else Color(0x1FFFFFFF),
+                    focusedBorderColor = palette.focusBorder,
                     focusedBorderWidth = 2.5.dp,
                     focusScale = 1.05f,
                     onFocusStateChanged = { focused ->
@@ -614,12 +629,12 @@ fun PopularHorizontalStrip(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 18.dp)
+            .padding(top = 10.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = AhOverscanHorizontal, vertical = 6.dp),
+                .padding(horizontal = AhOverscanHorizontal, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -644,7 +659,7 @@ fun PopularHorizontalStrip(
                 Text(
                     text = "Popular in Anime Today",
                     color = palette.textPrimary,
-                    fontSize = 21.sp,
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -652,9 +667,10 @@ fun PopularHorizontalStrip(
             AhFocusableBox(
                 onClick = onMoreClick,
                 shape = AhShape20,
-                containerColor = Color(0x26FFFFFF),
-                focusedContainerColor = Color.White,
-                focusedBorderColor = Color.White,
+                containerColor = palette.chipContainer,
+                focusedContainerColor = palette.focusContainer,
+                unfocusedBorderColor = palette.chipBorder,
+                focusedBorderColor = palette.focusBorder,
                 focusScale = 1.05f
             ) { isFocused ->
                 Row(
@@ -664,14 +680,14 @@ fun PopularHorizontalStrip(
                 ) {
                     Text(
                         text = "Explore All",
-                        color = if (isFocused) Color.Black else palette.textPrimary,
+                        color = if (isFocused) palette.onFocusContainer else palette.textPrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                         contentDescription = "Explore Popular",
-                        tint = if (isFocused) Color.Black else palette.textPrimary,
+                        tint = if (isFocused) palette.onFocusContainer else palette.textPrimary,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -684,9 +700,9 @@ fun PopularHorizontalStrip(
                 start = AhOverscanHorizontal,
                 end = AhOverscanHorizontal,
                 top = 4.dp,
-                bottom = 10.dp
+                bottom = 8.dp
             ),
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             itemsIndexed(
                 items = items,
@@ -694,29 +710,40 @@ fun PopularHorizontalStrip(
                 contentType = { _, _ -> "popular_card" }
             ) { index, anime ->
                 val rank = index + 1
-                Row(
-                    verticalAlignment = Alignment.Bottom
+                val itemWidth = when {
+                    rank == 10 -> 164.dp
+                    rank <= 10 -> 152.dp
+                    else -> 112.dp
+                }
+                Box(
+                    modifier = Modifier
+                        .width(itemWidth)
+                        .height(156.dp)
                 ) {
                     if (rank <= 10) {
                         Text(
                             text = rank.toString(),
                             color = if (palette.isLight) Color(0x38000000) else Color(0x5AFFFFFF),
-                            fontSize = if (rank == 10) 64.sp else 78.sp,
+                            fontSize = if (rank == 10) 56.sp else 68.sp,
+                            lineHeight = if (rank == 10) 56.sp else 68.sp,
                             fontWeight = FontWeight.Black,
                             letterSpacing = (-3).sp,
-                            modifier = Modifier.offset(x = 8.dp, y = 4.dp)
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .offset(x = if (rank == 10) (-2).dp else 2.dp, y = 6.dp)
                         )
                     }
 
                     AhFocusableBox(
                         onClick = { onAnimeClick(anime.id) },
                         modifier = Modifier
-                            .width(126.dp)
-                            .height(176.dp),
+                            .align(Alignment.BottomEnd)
+                            .width(112.dp)
+                            .height(156.dp),
                         shape = AhShape10,
                         containerColor = palette.surfaceElevated,
-                        unfocusedBorderColor = Color(0x1FFFFFFF),
-                        focusedBorderColor = Color.White,
+                        unfocusedBorderColor = if (palette.isLight) palette.borderSubtle else Color(0x1FFFFFFF),
+                        focusedBorderColor = palette.focusBorder,
                         focusedBorderWidth = 2.5.dp,
                         focusScale = 1.06f,
                         onFocusStateChanged = { focused ->
@@ -763,12 +790,13 @@ fun PopularHorizontalStrip(
                                     .fillMaxWidth()
                                     .align(Alignment.BottomCenter)
                                     .background(CARD_BOTTOM_SCRIM)
-                                    .padding(horizontal = 8.dp, vertical = 7.dp)
+                                    .padding(horizontal = 7.dp, vertical = 6.dp)
                             ) {
                                 Text(
                                     text = anime.title,
                                     color = Color.White,
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
+                                    lineHeight = 14.sp,
                                     fontWeight = if (isFocused) FontWeight.ExtraBold else FontWeight.SemiBold,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
@@ -851,16 +879,16 @@ private fun CircleToggleButton(
         onClick = onClick,
         modifier = Modifier.size(36.dp),
         shape = CircleShape,
-        containerColor = if (selected) Color.White else palette.surfaceElevated,
-        focusedContainerColor = Color.White,
-        unfocusedBorderColor = if (selected) Color.White else Color(0x33FFFFFF),
+        containerColor = if (selected) palette.focusContainer else palette.surfaceElevated,
+        focusedContainerColor = palette.focusContainer,
+        unfocusedBorderColor = if (selected) palette.focusContainer else palette.chipBorder,
         focusedBorderColor = palette.crimson,
         borderWidth = 1.dp,
         focusedBorderWidth = 2.dp,
         focusScale = 1.08f
     ) { isFocused ->
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            icon(if (selected || isFocused) Color.Black else palette.textSecondary)
+            icon(if (selected || isFocused) palette.onFocusContainer else palette.textSecondary)
         }
     }
 }
@@ -871,6 +899,8 @@ fun ScheduleListCard(
     isBookmarked: Boolean,
     onClick: () -> Unit,
     onToggleBookmark: () -> Unit,
+    isPopularRank: Boolean = false,
+    cardFocusRequester: FocusRequester? = null,
     onItemFocused: ((animeId: String, coverUrl: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -884,18 +914,20 @@ fun ScheduleListCard(
     ) {
         AhFocusableBox(
             onClick = onClick,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .then(if (cardFocusRequester != null) Modifier.focusRequester(cardFocusRequester) else Modifier),
             shape = AhShape10,
             containerColor = palette.surface,
             focusedContainerColor = palette.surfaceElevated,
-            unfocusedBorderColor = Color(0x18FFFFFF),
-            focusedBorderColor = Color.White,
+            unfocusedBorderColor = if (palette.isLight) palette.borderSubtle else Color(0x18FFFFFF),
+            focusedBorderColor = palette.focusBorder,
             focusedBorderWidth = 2.5.dp,
             focusScale = 1.015f,
             onFocusStateChanged = { focused ->
                 if (focused) onItemFocused?.invoke(item.id, item.coverUrl)
             }
-        ) { isFocused ->
+        ) { _ ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -916,7 +948,7 @@ fun ScheduleListCard(
                         modifier = Modifier.fillMaxSize()
                     )
                     if (item.episodeLabel.isNotBlank()) {
-                        val badgeText = if (item.rankDirection != null) {
+                        val badgeText = if (isPopularRank || item.rankDirection != null) {
                             "#${item.episodeLabel}"
                         } else {
                             "NEW EP ${item.episodeLabel}"
@@ -945,7 +977,7 @@ fun ScheduleListCard(
                 ) {
                     Text(
                         text = item.title,
-                        color = if (isFocused) Color.White else palette.textPrimary,
+                        color = palette.textPrimary,
                         fontSize = 19.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
@@ -974,9 +1006,9 @@ fun ScheduleListCard(
             modifier = Modifier.size(44.dp),
             shape = CircleShape,
             containerColor = if (isBookmarked) palette.crimson else palette.surfaceElevated,
-            focusedContainerColor = Color.White,
-            unfocusedBorderColor = if (isBookmarked) palette.crimson else Color(0x38FFFFFF),
-            focusedBorderColor = Color.White,
+            focusedContainerColor = palette.focusContainer,
+            unfocusedBorderColor = if (isBookmarked) palette.crimson else palette.chipBorder,
+            focusedBorderColor = palette.focusBorder,
             borderWidth = 1.5.dp,
             focusScale = 1.1f
         ) { isFocused ->
@@ -984,7 +1016,11 @@ fun ScheduleListCard(
                 Icon(
                     imageVector = if (isBookmarked) AhIcons.Bookmark else AhIcons.BookmarkBorder,
                     contentDescription = if (isBookmarked) "Remove Bookmark" else "Bookmark",
-                    tint = if (isFocused) Color.Black else Color.White,
+                    tint = when {
+                        isFocused -> palette.onFocusContainer
+                        isBookmarked -> Color.White
+                        else -> palette.textPrimary
+                    },
                     modifier = Modifier.size(21.dp)
                 )
             }
@@ -997,6 +1033,7 @@ fun ScheduleGridCard(
     item: AnimeCard,
     isBookmarked: Boolean,
     onClick: () -> Unit,
+    isPopularRank: Boolean = false,
     onItemFocused: ((animeId: String, coverUrl: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -1007,14 +1044,14 @@ fun ScheduleGridCard(
         shape = AhShape10,
         containerColor = palette.surface,
         focusedContainerColor = palette.surfaceElevated,
-        unfocusedBorderColor = Color(0x18FFFFFF),
-        focusedBorderColor = Color.White,
+        unfocusedBorderColor = if (palette.isLight) palette.borderSubtle else Color(0x18FFFFFF),
+        focusedBorderColor = palette.focusBorder,
         focusedBorderWidth = 2.5.dp,
         focusScale = 1.05f,
         onFocusStateChanged = { focused ->
             if (focused) onItemFocused?.invoke(item.id, item.coverUrl)
         }
-    ) { isFocused ->
+    ) { _ ->
         Column {
             Box(
                 modifier = Modifier
@@ -1033,7 +1070,7 @@ fun ScheduleGridCard(
                         .background(CARD_BOTTOM_SCRIM)
                 )
                 if (item.episodeLabel.isNotBlank()) {
-                    val badgeText = if (item.rankDirection != null) {
+                    val badgeText = if (isPopularRank || item.rankDirection != null) {
                         "#${item.episodeLabel}"
                     } else {
                         "EP ${item.episodeLabel}"
@@ -1082,7 +1119,7 @@ fun ScheduleGridCard(
             ) {
                 Text(
                     text = item.title,
-                    color = if (isFocused) Color.White else palette.textPrimary,
+                    color = palette.textPrimary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
@@ -1118,8 +1155,8 @@ fun SimilarShowCard(
         shape = AhShape10,
         containerColor = palette.surface,
         focusedContainerColor = palette.surfaceElevated,
-        unfocusedBorderColor = Color(0x18FFFFFF),
-        focusedBorderColor = Color.White,
+        unfocusedBorderColor = if (palette.isLight) palette.borderSubtle else Color(0x18FFFFFF),
+        focusedBorderColor = palette.focusBorder,
         focusedBorderWidth = 2.5.dp,
         focusScale = 1.05f,
         onFocusStateChanged = { focused ->
@@ -1137,8 +1174,9 @@ fun SimilarShowCard(
             )
             Text(
                 text = item.title,
-                color = if (isFocused) Color.White else palette.textSecondary,
+                color = if (isFocused) palette.textPrimary else palette.textSecondary,
                 fontSize = 13.sp,
+                lineHeight = 16.sp,
                 fontWeight = if (isFocused) FontWeight.Bold else FontWeight.SemiBold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -1204,7 +1242,9 @@ private fun RankOrTimerBadge(item: AnimeCard) {
 @Composable
 fun AnimeHeavenFooter(
     onOpenSettings: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    buttonFocusRequester: FocusRequester? = null,
+    onButtonFocusChanged: ((Boolean) -> Unit)? = null
 ) {
     val palette = LocalAhPalette.current
     Row(
@@ -1238,12 +1278,18 @@ fun AnimeHeavenFooter(
         }
         AhFocusableBox(
             onClick = onOpenSettings,
+            modifier = if (buttonFocusRequester != null) {
+                Modifier.focusRequester(buttonFocusRequester)
+            } else {
+                Modifier
+            },
             shape = AhShape20,
             containerColor = palette.surfaceElevated,
-            focusedContainerColor = Color.White,
-            unfocusedBorderColor = Color(0x33FFFFFF),
-            focusedBorderColor = Color.White,
-            focusScale = 1.06f
+            focusedContainerColor = palette.focusContainer,
+            unfocusedBorderColor = palette.chipBorder,
+            focusedBorderColor = palette.focusBorder,
+            focusScale = 1.06f,
+            onFocusStateChanged = onButtonFocusChanged
         ) { isFocused ->
             Row(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
@@ -1253,12 +1299,12 @@ fun AnimeHeavenFooter(
                 Icon(
                     imageVector = AhIcons.Tune,
                     contentDescription = null,
-                    tint = if (isFocused) Color.Black else Color.White,
+                    tint = if (isFocused) palette.onFocusContainer else palette.textPrimary,
                     modifier = Modifier.size(17.dp)
                 )
                 Text(
-                    text = "Settings & Theme",
-                    color = if (isFocused) Color.Black else Color.White,
+                    text = "Settings & Themes",
+                    color = if (isFocused) palette.onFocusContainer else palette.textPrimary,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
                 )
@@ -1327,8 +1373,8 @@ fun AhErrorBox(
                 modifier = retryModifier,
                 onClick = onRetry,
                 shape = AhShape3,
-                containerColor = Color.White,
-                focusedContainerColor = Color.White,
+                containerColor = palette.focusContainer,
+                focusedContainerColor = palette.focusContainer,
                 focusedBorderColor = palette.crimson,
                 focusedBorderWidth = 3.dp
             ) { _ ->
@@ -1340,11 +1386,11 @@ fun AhErrorBox(
                     Icon(
                         imageVector = Icons.Rounded.Refresh,
                         contentDescription = null,
-                        tint = Color.Black
+                        tint = palette.onFocusContainer
                     )
                     Text(
                         text = "Try Again",
-                        color = Color.Black,
+                        color = palette.onFocusContainer,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.ExtraBold
                     )

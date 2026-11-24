@@ -115,6 +115,9 @@ private enum class ResizeOption(val label: String, val mode: Int) {
 private val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f)
 private val HUD_TOP_SCRIM = Brush.verticalGradient(listOf(Color(0xE6000000), Color.Transparent))
 private val HUD_BOTTOM_SCRIM = Brush.verticalGradient(listOf(Color.Transparent, Color(0xEC000000)))
+private val HUD_TEXT_SECONDARY = Color(0xFFD2D2D2)
+private val HUD_SURFACE_ELEVATED = Color(0xFF262626)
+private val HUD_BORDER_SUBTLE = Color(0x38FFFFFF)
 private val SEEK_BADGE_SHAPE = RoundedCornerShape(6.dp)
 private val SEEK_TRACK_BG = Color(0x55FFFFFF)
 private val SEEK_BUFFER_COLOR = Color(0x77BDBDBD)
@@ -687,7 +690,10 @@ fun PlayerScreen(
 
         // Stream / Mirror Error Overlay
         if (state.errorMessage != null) {
-            LaunchedEffect(state.errorMessage) { retryFocusRequester.requestFocus() }
+            LaunchedEffect(state.errorMessage) {
+                delay(60L)
+                runCatching { retryFocusRequester.requestFocus() }
+            }
             AhErrorBox(
                 errorMessage = state.errorMessage ?: "Playback failed",
                 onRetry = viewModel::retryCurrentEpisode,
@@ -790,7 +796,7 @@ fun PlayerScreen(
                         progressState = progressState,
                         seekFeedback = seekFeedback,
                         accentColor = palette.crimson,
-                        secondaryTextColor = palette.textSecondary
+                        secondaryTextColor = HUD_TEXT_SECONDARY
                     )
 
                     val stream = state.stream
@@ -813,13 +819,13 @@ fun PlayerScreen(
                                 }
                             }
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         HudActionButton(
                             icon = AhIcons.Replay10,
                             label = "-10s",
                             onClick = { triggerSeek(-10_000L, "-10s") }
                         )
-                        Spacer(modifier = Modifier.width(12.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         HudActionButton(
                             icon = if (isPlaying) AhIcons.Pause else Icons.Rounded.PlayArrow,
                             label = if (isPlaying) "Pause" else "Play",
@@ -830,13 +836,13 @@ fun PlayerScreen(
                                 hudInteractionNonce++
                             }
                         )
-                        Spacer(modifier = Modifier.width(12.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         HudActionButton(
                             icon = AhIcons.FastForward,
                             label = "+10s",
                             onClick = { triggerSeek(+10_000L, "+10s") }
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         HudActionButton(
                             icon = AhIcons.Forward30,
                             label = if (state.skipTimes.op != null) {
@@ -854,7 +860,7 @@ fun PlayerScreen(
                                 executeSkipAction(action)
                             }
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         HudActionButton(
                             icon = AhIcons.FastForward,
                             label = if (state.skipTimes.ed != null || stream?.nextEpisodeKey == null) {
@@ -873,7 +879,7 @@ fun PlayerScreen(
                                 executeSkipAction(action)
                             }
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         HudActionButton(
                             icon = AhIcons.SkipNext,
                             label = "Next Ep",
@@ -966,8 +972,9 @@ fun PlayerScreen(
                         }
                         AhStaticFocusableBox(
                             onClick = { showUpNextOverlay = false },
-                            containerColor = palette.surfaceElevated,
+                            containerColor = HUD_SURFACE_ELEVATED,
                             focusedContainerColor = palette.crimson,
+                            unfocusedBorderColor = HUD_BORDER_SUBTLE,
                             focusedBorderColor = Color.White
                         ) {
                             Text(
@@ -1170,7 +1177,7 @@ private fun SkipPromptOverlay(
             }
             Text(
                 text = "Press OK to $destinationText",
-                color = palette.textSecondary,
+                color = HUD_TEXT_SECONDARY,
                 fontSize = 13.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -1209,7 +1216,7 @@ private fun HudPillButton(
         shape = AhShape20,
         containerColor = Color(0xCC121212),
         focusedContainerColor = palette.crimson,
-        unfocusedBorderColor = palette.borderSubtle,
+        unfocusedBorderColor = HUD_BORDER_SUBTLE,
         focusedBorderColor = Color.White
     ) {
         Row(
@@ -1227,7 +1234,9 @@ private fun HudPillButton(
                 text = label,
                 color = Color.White,
                 fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false
             )
         }
     }
@@ -1254,17 +1263,17 @@ private fun HudActionButton(
             else -> Color(0xCC121212)
         },
         focusedContainerColor = if (isPrimary) Color.White else palette.crimson,
-        unfocusedBorderColor = if (isPrimary) palette.crimson else palette.borderSubtle,
+        unfocusedBorderColor = if (isPrimary) palette.crimson else HUD_BORDER_SUBTLE,
         focusedBorderColor = if (isPrimary) palette.crimson else Color.White,
         focusScale = 1.07f
     ) { isFocused ->
         Row(
             modifier = Modifier.padding(
-                horizontal = if (isPrimary) 18.dp else 12.dp,
-                vertical = if (isPrimary) 11.dp else 9.dp
+                horizontal = if (isPrimary) 14.dp else 10.dp,
+                vertical = if (isPrimary) 10.dp else 8.dp
             ),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Icon(
                 imageVector = icon,
@@ -1274,7 +1283,7 @@ private fun HudActionButton(
                     isPrimary && isFocused -> palette.crimson
                     else -> Color.White
                 },
-                modifier = Modifier.size(if (isPrimary) 24.dp else 20.dp)
+                modifier = Modifier.size(if (isPrimary) 22.dp else 19.dp)
             )
             Text(
                 text = label,
@@ -1283,8 +1292,10 @@ private fun HudActionButton(
                     isPrimary && isFocused -> palette.crimson
                     else -> Color.White
                 },
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                softWrap = false
             )
         }
     }

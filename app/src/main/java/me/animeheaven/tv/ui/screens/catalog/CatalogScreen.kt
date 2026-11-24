@@ -11,15 +11,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListPrefetchStrategy
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import me.animeheaven.tv.data.model.FeedViewMode
 import me.animeheaven.tv.ui.components.AhErrorBox
 import me.animeheaven.tv.ui.components.AhLoadingBox
@@ -91,6 +96,27 @@ fun CatalogScreen(
             }
             else -> {
                 val isTagGrid = viewModel.kind == CatalogKind.TAG
+                val isPopularRank = viewModel.kind == CatalogKind.POPULAR
+                val firstItemFocusRequester = remember { FocusRequester() }
+                var hasFocusedFirstItem by remember { mutableStateOf(false) }
+                var isFirstItemFocused by remember { mutableStateOf(false) }
+                LaunchedEffect(state.items.isNotEmpty()) {
+                    if (state.items.isNotEmpty() && !hasFocusedFirstItem) {
+                        repeat(8) {
+                            if (isFirstItemFocused) {
+                                hasFocusedFirstItem = true
+                                return@LaunchedEffect
+                            }
+                            delay(120L)
+                            if (isFirstItemFocused) {
+                                hasFocusedFirstItem = true
+                                return@LaunchedEffect
+                            }
+                            runCatching { firstItemFocusRequester.requestFocus() }
+                        }
+                        hasFocusedFirstItem = true
+                    }
+                }
                 val listState = rememberLazyListState(
                     prefetchStrategy = remember { LazyListPrefetchStrategy(nestedPrefetchItemCount = 4) }
                 )
@@ -110,11 +136,11 @@ fun CatalogScreen(
                     }
 
                     if (isTagGrid) {
-                        items(
+                        itemsIndexed(
                             items = gridRows,
-                            key = { row -> row.key },
-                            contentType = { "tag_grid_row" }
-                        ) { row ->
+                            key = { _, row -> row.key },
+                            contentType = { _, _ -> "tag_grid_row" }
+                        ) { rowIdx, row ->
                             val rowItems = row.items
                             Row(
                                 modifier = Modifier
@@ -122,12 +148,18 @@ fun CatalogScreen(
                                     .padding(horizontal = AhOverscanHorizontal, vertical = 6.dp),
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
-                                rowItems.forEach { card ->
+                                rowItems.forEachIndexed { colIdx, card ->
+                                    val isFirst = rowIdx == 0 && colIdx == 0
                                     SimilarShowCard(
                                         item = card,
                                         onClick = { onOpenAnime(card.id) },
-                                        onItemFocused = viewModel::onCardFocused,
-                                        modifier = Modifier.weight(1f)
+                                        onItemFocused = { id, cover ->
+                                            if (isFirst) isFirstItemFocused = true
+                                            viewModel.onCardFocused(id, cover)
+                                        },
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .then(if (isFirst) Modifier.focusRequester(firstItemFocusRequester) else Modifier)
                                     )
                                 }
                                 repeat(4 - rowItems.size) {
@@ -146,7 +178,10 @@ fun CatalogScreen(
                                 isBookmarked = state.bookmarkedIds.contains(card.id),
                                 onClick = { onOpenAnime(card.id) },
                                 onToggleBookmark = { viewModel.toggleBookmark(card) },
+                                isPopularRank = isPopularRank,
+                                cardFocusRequester = if (index == 0) firstItemFocusRequester else null,
                                 onItemFocused = { id, cover ->
+                                    if (index == 0) isFirstItemFocused = true
                                     val n1 = state.items.getOrNull(index + 1)
                                     val n2 = state.items.getOrNull(index + 2)
                                     viewModel.onCardFocused(
@@ -172,11 +207,14 @@ fun CatalogScreen(
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
                                 rowItems.forEachIndexed { colIdx, card ->
+                                    val isFirst = rowIdx == 0 && colIdx == 0
                                     ScheduleGridCard(
                                         item = card,
                                         isBookmarked = state.bookmarkedIds.contains(card.id),
                                         onClick = { onOpenAnime(card.id) },
+                                        isPopularRank = isPopularRank,
                                         onItemFocused = { id, cover ->
+                                            if (isFirst) isFirstItemFocused = true
                                             val nextInRow = rowItems.getOrNull(colIdx + 1)
                                             val belowCard = gridRows.getOrNull(rowIdx + 1)?.items?.getOrNull(colIdx)
                                             viewModel.onCardFocused(
@@ -186,7 +224,9 @@ fun CatalogScreen(
                                                 neighborCovers = listOfNotNull(nextInRow?.coverUrl, belowCard?.coverUrl)
                                             )
                                         },
-                                        modifier = Modifier.weight(1f)
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .then(if (isFirst) Modifier.focusRequester(firstItemFocusRequester) else Modifier)
                                     )
                                 }
                                 repeat(4 - rowItems.size) {

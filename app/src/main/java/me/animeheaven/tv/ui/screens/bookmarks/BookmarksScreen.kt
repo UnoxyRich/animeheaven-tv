@@ -2,6 +2,7 @@ package me.animeheaven.tv.ui.screens.bookmarks
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,10 +22,16 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -32,12 +39,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import me.animeheaven.tv.data.cache.ImageTargetSize
 import me.animeheaven.tv.data.model.ContinueWatchingItem
 import me.animeheaven.tv.ui.components.AhCoverImage
 import me.animeheaven.tv.ui.components.AhFocusableBox
 import me.animeheaven.tv.ui.components.AhIcons
 import me.animeheaven.tv.ui.components.AhOverscanHorizontal
+import me.animeheaven.tv.ui.components.AhShape2
 import me.animeheaven.tv.ui.components.AhShape4
 import me.animeheaven.tv.ui.components.AnimeHeavenFooter
 import me.animeheaven.tv.ui.components.AnimeHeavenHeader
@@ -85,6 +94,18 @@ fun BookmarksScreen(
             prefetchStrategy = remember { LazyListPrefetchStrategy(nestedPrefetchItemCount = 4) }
         )
         val bookmarkRows = remember(state.bookmarks) { state.bookmarks.toGridRows(4) { it.animeId } }
+        val initialFocusRequester = remember { FocusRequester() }
+        var isInitialTargetFocused by remember { mutableStateOf(false) }
+
+        LaunchedEffect(state.bookmarks.isEmpty()) {
+            isInitialTargetFocused = false
+            repeat(8) {
+                if (isInitialTargetFocused) return@LaunchedEffect
+                delay(120L)
+                if (isInitialTargetFocused) return@LaunchedEffect
+                runCatching { initialFocusRequester.requestFocus() }
+            }
+        }
 
         LazyColumn(
             state = listState,
@@ -116,6 +137,7 @@ fun BookmarksScreen(
                             .fillMaxWidth()
                             .padding(horizontal = AhOverscanHorizontal, vertical = 32.dp)
                             .background(palette.surface, AhShape4)
+                            .border(1.dp, palette.borderSubtle, AhShape4)
                             .padding(28.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -142,17 +164,23 @@ fun BookmarksScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         rowItems.forEachIndexed { colIdx, bm ->
+                            val isFirst = rowIdx == 0 && colIdx == 0
                             Column(
                                 modifier = Modifier.weight(1f),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 AhFocusableBox(
                                     onClick = { onOpenAnime(bm.animeId) },
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .then(if (isFirst) Modifier.focusRequester(initialFocusRequester) else Modifier),
                                     containerColor = palette.surface,
+                                    unfocusedBorderColor = palette.borderSubtle,
+                                    focusedBorderColor = palette.focusBorder,
                                     focusScale = 1.03f,
                                     onFocusStateChanged = { focused ->
                                         if (focused) {
+                                            if (isFirst) isInitialTargetFocused = true
                                             val nextInRow = rowItems.getOrNull(colIdx + 1)
                                             val belowCard = bookmarkRows.getOrNull(rowIdx + 1)?.items?.getOrNull(colIdx)
                                             viewModel.onCardFocused(
@@ -169,6 +197,7 @@ fun BookmarksScreen(
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .aspectRatio(16f / 9f)
+                                                .clip(AhShape4)
                                         ) {
                                             AhCoverImage(
                                                 url = bm.coverUrl,
@@ -180,6 +209,8 @@ fun BookmarksScreen(
                                                 Box(
                                                     modifier = Modifier
                                                         .align(Alignment.TopStart)
+                                                        .padding(6.dp)
+                                                        .clip(AhShape2)
                                                         .background(palette.crimson)
                                                         .padding(horizontal = 7.dp, vertical = 3.dp)
                                                 ) {
@@ -197,6 +228,7 @@ fun BookmarksScreen(
                                             text = bm.title,
                                             color = if (isFocused) palette.textPrimary else palette.textSecondary,
                                             fontSize = 15.sp,
+                                            lineHeight = 19.sp,
                                             fontWeight = FontWeight.SemiBold,
                                             maxLines = 2,
                                             overflow = TextOverflow.Ellipsis,
@@ -213,7 +245,8 @@ fun BookmarksScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                     containerColor = palette.surfaceElevated,
                                     focusedContainerColor = palette.crimson,
-                                    focusedBorderColor = Color.White
+                                    unfocusedBorderColor = palette.borderSubtle,
+                                    focusedBorderColor = palette.focusBorder
                                 ) { isFocused ->
                                     Row(
                                         modifier = Modifier
@@ -246,7 +279,13 @@ fun BookmarksScreen(
             }
 
             item(key = "footer", contentType = "footer") {
-                AnimeHeavenFooter(onOpenSettings = onOpenSettings)
+                AnimeHeavenFooter(
+                    onOpenSettings = onOpenSettings,
+                    buttonFocusRequester = if (state.bookmarks.isEmpty()) initialFocusRequester else null,
+                    onButtonFocusChanged = { focused ->
+                        if (focused && state.bookmarks.isEmpty()) isInitialTargetFocused = true
+                    }
+                )
             }
         }
     }

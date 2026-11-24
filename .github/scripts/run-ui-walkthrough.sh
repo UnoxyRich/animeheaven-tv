@@ -19,6 +19,6 @@ timeout 5m adb shell am instrument -w -r "$1.test/androidx.test.runner.AndroidJU
   | tee ui-test-results/instrumentation.txt
 grep -Eq 'OK \([1-9][0-9]* tests?\)' ui-test-results/instrumentation.txt
 timeout 45s adb pull /data/local/tmp/ci-screenshots/. screenshots/
-for number in 01 02 03 04 05 06 07 08; do
+for number in 01 02 03 04 05 06 07 08 09 10; do
   compgen -G "screenshots/$number-*.png" >/dev/null
 done

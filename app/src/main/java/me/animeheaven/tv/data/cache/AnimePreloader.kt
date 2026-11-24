@@ -645,7 +645,7 @@ class AnimePreloader(
     companion object {
         private const val DEFAULT_EP_DURATION_MS = 24L * 60_000L
         private const val DEFAULT_OP_END_MS = 85_000L
-        private const val BAND1_STARTUP_GRACE_MS = 450L
+        private const val BAND1_STARTUP_GRACE_MS = 1_800L
         private const val USER_YIELD_MAX_WAIT_MS = 6_000L
     }
 }

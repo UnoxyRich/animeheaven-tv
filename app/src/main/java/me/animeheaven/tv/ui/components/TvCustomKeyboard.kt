@@ -1,6 +1,7 @@
 package me.animeheaven.tv.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -70,6 +71,7 @@ fun TvCustomKeyboard(
     Column(
         modifier = modifier
             .background(palette.surface, AhShape4)
+            .border(1.dp, palette.borderSubtle, AhShape4)
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
@@ -206,10 +208,10 @@ private fun KeyCap(
             contentDescription = accessibilityLabel
         },
         shape = AhShape3,
-        containerColor = if (isPrimary) Color.White else palette.surfaceElevated,
-        focusedContainerColor = if (isPrimary) palette.crimson else Color.White,
-        unfocusedBorderColor = if (isPrimary) Color.White else palette.borderSubtle,
-        focusedBorderColor = Color.White,
+        containerColor = if (isPrimary) palette.crimson else palette.surfaceElevated,
+        focusedContainerColor = palette.focusContainer,
+        unfocusedBorderColor = if (isPrimary) palette.crimson else palette.borderSubtle,
+        focusedBorderColor = palette.focusBorder,
         borderWidth = 1.dp,
         focusedBorderWidth = 2.dp,
         focusScale = 1.07f
@@ -221,9 +223,8 @@ private fun KeyCap(
             Text(
                 text = label,
                 color = when {
-                    isPrimary && isFocused -> Color.White
-                    isPrimary -> Color.Black
-                    isFocused -> Color.Black
+                    isFocused -> palette.onFocusContainer
+                    isPrimary -> Color.White
                     else -> palette.textPrimary
                 },
                 fontSize = if (label.length > 2) 13.sp else 16.sp,
