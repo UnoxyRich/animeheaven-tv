@@ -280,9 +280,10 @@ fun AnimeDetailScreen(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
-                                        if (detail.score.isNotBlank()) {
+                                        val normalizedScore = detail.score.trim()
+                                        if (normalizedScore.isNotEmpty() && normalizedScore != "?" && !normalizedScore.equals("N/A", ignoreCase = true)) {
                                             Text(
-                                                text = "Score ${detail.score}",
+                                                text = "Score $normalizedScore",
                                                 color = palette.positiveGreen,
                                                 fontSize = 14.sp,
                                                 fontWeight = FontWeight.Bold

@@ -10,14 +10,18 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusEventModifierNode
-import androidx.compose.ui.focus.FocusState
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -29,20 +33,9 @@ import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
-import androidx.compose.ui.layout.Measurable
-import androidx.compose.ui.layout.MeasureResult
-import androidx.compose.ui.layout.MeasureScope
-import androidx.compose.ui.node.DrawModifierNode
-import androidx.compose.ui.node.LayoutModifierNode
-import androidx.compose.ui.node.ModifierNodeElement
-import androidx.compose.ui.node.invalidateDraw
-import androidx.compose.ui.node.invalidateLayer
-import androidx.compose.ui.platform.InspectorInfo
-import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 import me.animeheaven.tv.ui.theme.LocalAhPalette
 
 val AhOverscanHorizontal: Dp = 40.dp
@@ -62,10 +55,10 @@ val AhShape20: Shape = RoundedCornerShape(24.dp)
 private val FOCUS_SCALE_SPEC = tween<Float>(durationMillis = 120)
 
 /**
- * High-performance TV focus container backed by a custom [Modifier.Node]:
- * - Zero idle animation coroutines on unfocused cards/keys (Animatable is allocated lazily on first focus)
- * - Background & border are drawn in the Draw phase (zero BorderStroke allocations, zero relayout)
- * - Shape clipping is merged into the graphics layer (no redundant .clip() render node)
+ * High-performance TV focus container:
+ * - Zero idle animation coroutines on unfocused cards/keys (Animatable allocated lazily on first focus)
+ * - Background & border drawn cleanly in the Draw phase so theme/selection changes ALWAYS redraw immediately
+ * - Shape clipping & focus scale execute on a dedicated graphicsLayer wrapping both background/border and content
  */
 @Composable
 fun AhFocusableBox(
@@ -84,30 +77,57 @@ fun AhFocusableBox(
     content: @Composable BoxScope.(isFocused: Boolean) -> Unit
 ) {
     val palette = LocalAhPalette.current
+    val resolvedContainer = containerColor ?: palette.surface
+    val resolvedFocusedContainer = focusedContainerColor ?: palette.surfaceFocused
+    val resolvedUnfocusedBorder = unfocusedBorderColor ?: Color.Unspecified
+    val resolvedFocusedBorder = focusedBorderColor ?: palette.focusBorder
+
     var isFocused by remember { mutableStateOf(false) }
+    val scaleState = remember { mutableFloatStateOf(1f) }
+    var hasEverAnimated by remember { mutableStateOf(false) }
     val interactionSource = remember { MutableInteractionSource() }
+
+    val targetScale = if (isFocused && enabled) focusScale else 1f
+    if (targetScale != 1f || hasEverAnimated) {
+        LaunchedEffect(targetScale) {
+            hasEverAnimated = true
+            val anim = Animatable(scaleState.floatValue)
+            anim.animateTo(targetScale, animationSpec = FOCUS_SCALE_SPEC) {
+                scaleState.floatValue = value
+            }
+        }
+    }
 
     Box(
         modifier = modifier
-            .then(
-                AhTvFocusModifierElement(
-                    enabled = enabled,
+            .graphicsLayer {
+                val s = scaleState.floatValue
+                scaleX = s
+                scaleY = s
+                if (shape !== RectangleShape) {
+                    this.shape = shape
+                    clip = true
+                }
+            }
+            .drawWithContent {
+                drawAhFocusChrome(
+                    activeFocus = isFocused && enabled,
                     shape = shape,
-                    containerColor = containerColor ?: palette.surface,
-                    focusedContainerColor = focusedContainerColor ?: palette.surfaceFocused,
-                    unfocusedBorderColor = unfocusedBorderColor ?: Color.Unspecified,
-                    focusedBorderColor = focusedBorderColor ?: palette.focusBorder,
+                    containerColor = resolvedContainer,
+                    focusedContainerColor = resolvedFocusedContainer,
+                    unfocusedBorderColor = resolvedUnfocusedBorder,
+                    focusedBorderColor = resolvedFocusedBorder,
                     borderWidth = borderWidth,
-                    focusedBorderWidth = focusedBorderWidth,
-                    focusScale = focusScale,
-                    onFocusChanged = { now ->
-                        if (isFocused != now) {
-                            isFocused = now
-                            onFocusStateChanged?.invoke(now)
-                        }
-                    }
+                    focusedBorderWidth = focusedBorderWidth
                 )
-            )
+            }
+            .onFocusChanged { focusState ->
+                val now = focusState.isFocused
+                if (isFocused != now) {
+                    isFocused = now
+                    onFocusStateChanged?.invoke(now)
+                }
+            }
             .clickable(
                 enabled = enabled,
                 interactionSource = interactionSource,
@@ -122,7 +142,8 @@ fun AhFocusableBox(
 /**
  * Zero-recomposition TV focus container for items whose child content does NOT depend on
  * `isFocused` (cards with static thumbnails, icon buttons, arrow buttons, etc.). Focus transitions
- * execute purely in the GraphicsLayer & Draw phases with zero Compose recomposition.
+ * execute purely in the GraphicsLayer & Draw phases with zero child content recomposition, while
+ * theme/selection color & border updates always redraw immediately.
  */
 @Composable
 fun AhStaticFocusableBox(
@@ -141,24 +162,67 @@ fun AhStaticFocusableBox(
     content: @Composable BoxScope.() -> Unit
 ) {
     val palette = LocalAhPalette.current
+    val resolvedContainer = containerColor ?: palette.surface
+    val resolvedFocusedContainer = focusedContainerColor ?: palette.surfaceFocused
+    val resolvedUnfocusedBorder = unfocusedBorderColor ?: Color.Unspecified
+    val resolvedFocusedBorder = focusedBorderColor ?: palette.focusBorder
+
+    val isFocusedState = remember { mutableStateOf(false) }
+    val scaleState = remember { mutableFloatStateOf(1f) }
+    val animRef = remember { arrayOfNulls<Animatable<Float, AnimationVector1D>>(1) }
+    val jobRef = remember { arrayOfNulls<Job>(1) }
+    val scope = rememberCoroutineScope()
     val interactionSource = remember { MutableInteractionSource() }
+
+    LaunchedEffect(enabled, focusScale) {
+        val target = if (isFocusedState.value && enabled) focusScale else 1f
+        if (target != scaleState.floatValue) {
+            jobRef[0]?.cancel()
+            val anim = animRef[0] ?: Animatable(scaleState.floatValue).also { animRef[0] = it }
+            anim.animateTo(target, animationSpec = FOCUS_SCALE_SPEC) {
+                scaleState.floatValue = value
+            }
+        }
+    }
 
     Box(
         modifier = modifier
-            .then(
-                AhTvFocusModifierElement(
-                    enabled = enabled,
+            .graphicsLayer {
+                val s = scaleState.floatValue
+                scaleX = s
+                scaleY = s
+                if (shape !== RectangleShape) {
+                    this.shape = shape
+                    clip = true
+                }
+            }
+            .drawWithContent {
+                drawAhFocusChrome(
+                    activeFocus = isFocusedState.value && enabled,
                     shape = shape,
-                    containerColor = containerColor ?: palette.surface,
-                    focusedContainerColor = focusedContainerColor ?: palette.surfaceFocused,
-                    unfocusedBorderColor = unfocusedBorderColor ?: Color.Unspecified,
-                    focusedBorderColor = focusedBorderColor ?: palette.focusBorder,
+                    containerColor = resolvedContainer,
+                    focusedContainerColor = resolvedFocusedContainer,
+                    unfocusedBorderColor = resolvedUnfocusedBorder,
+                    focusedBorderColor = resolvedFocusedBorder,
                     borderWidth = borderWidth,
-                    focusedBorderWidth = focusedBorderWidth,
-                    focusScale = focusScale,
-                    onFocusChanged = onFocusStateChanged
+                    focusedBorderWidth = focusedBorderWidth
                 )
-            )
+            }
+            .onFocusChanged { focusState ->
+                val now = focusState.isFocused
+                if (isFocusedState.value != now) {
+                    isFocusedState.value = now
+                    val target = if (now && enabled) focusScale else 1f
+                    jobRef[0]?.cancel()
+                    jobRef[0] = scope.launch {
+                        val anim = animRef[0] ?: Animatable(scaleState.floatValue).also { animRef[0] = it }
+                        anim.animateTo(target, animationSpec = FOCUS_SCALE_SPEC) {
+                            scaleState.floatValue = value
+                        }
+                    }
+                    onFocusStateChanged?.invoke(now)
+                }
+            }
             .clickable(
                 enabled = enabled,
                 interactionSource = interactionSource,
@@ -169,193 +233,68 @@ fun AhStaticFocusableBox(
     )
 }
 
-private data class AhTvFocusModifierElement(
-    val enabled: Boolean,
-    val shape: Shape,
-    val containerColor: Color,
-    val focusedContainerColor: Color,
-    val unfocusedBorderColor: Color,
-    val focusedBorderColor: Color,
-    val borderWidth: Dp,
-    val focusedBorderWidth: Dp,
-    val focusScale: Float,
-    val onFocusChanged: ((Boolean) -> Unit)?
-) : ModifierNodeElement<AhTvFocusNode>() {
-
-    override fun create(): AhTvFocusNode = AhTvFocusNode(
-        enabled = enabled,
-        shape = shape,
-        containerColor = containerColor,
-        focusedContainerColor = focusedContainerColor,
-        unfocusedBorderColor = unfocusedBorderColor,
-        focusedBorderColor = focusedBorderColor,
-        borderWidth = borderWidth,
-        focusedBorderWidth = focusedBorderWidth,
-        focusScale = focusScale,
-        onFocusChanged = onFocusChanged
-    )
-
-    override fun update(node: AhTvFocusNode) {
-        val visualChanged = node.enabled != enabled ||
-            node.shape != shape ||
-            node.containerColor != containerColor ||
-            node.focusedContainerColor != focusedContainerColor ||
-            node.unfocusedBorderColor != unfocusedBorderColor ||
-            node.focusedBorderColor != focusedBorderColor ||
-            node.borderWidth != borderWidth ||
-            node.focusedBorderWidth != focusedBorderWidth
-
-        val scaleTargetChanged = node.enabled != enabled || node.focusScale != focusScale
-
-        node.enabled = enabled
-        node.shape = shape
-        node.containerColor = containerColor
-        node.focusedContainerColor = focusedContainerColor
-        node.unfocusedBorderColor = unfocusedBorderColor
-        node.focusedBorderColor = focusedBorderColor
-        node.borderWidth = borderWidth
-        node.focusedBorderWidth = focusedBorderWidth
-        node.focusScale = focusScale
-        node.onFocusChanged = onFocusChanged
-
-        if (scaleTargetChanged) {
-            node.syncScaleTarget()
-        }
-        if (visualChanged) {
-            node.invalidateDraw()
-            node.invalidateLayer()
-        }
+private fun ContentDrawScope.drawAhFocusChrome(
+    activeFocus: Boolean,
+    shape: Shape,
+    containerColor: Color,
+    focusedContainerColor: Color,
+    unfocusedBorderColor: Color,
+    focusedBorderColor: Color,
+    borderWidth: Dp,
+    focusedBorderWidth: Dp
+) {
+    val bg = if (activeFocus) focusedContainerColor else containerColor
+    val cachedOutline = if (shape !== RectangleShape && shape !== CircleShape) {
+        shape.createOutline(size, layoutDirection, this)
+    } else {
+        null
     }
 
-    override fun InspectorInfo.inspectableProperties() {
-        name = "ahTvFocus"
-    }
-}
-
-private class AhTvFocusNode(
-    var enabled: Boolean,
-    var shape: Shape,
-    var containerColor: Color,
-    var focusedContainerColor: Color,
-    var unfocusedBorderColor: Color,
-    var focusedBorderColor: Color,
-    var borderWidth: Dp,
-    var focusedBorderWidth: Dp,
-    var focusScale: Float,
-    var onFocusChanged: ((Boolean) -> Unit)?
-) : Modifier.Node(), FocusEventModifierNode, LayoutModifierNode, DrawModifierNode {
-
-    private var isFocused: Boolean = false
-    private val currentScaleState = mutableFloatStateOf(1f)
-    private var scaleAnim: Animatable<Float, AnimationVector1D>? = null
-    private var scaleJob: Job? = null
-
-    override fun onFocusEvent(focusState: FocusState) {
-        val now = focusState.isFocused
-        if (isFocused == now) return
-        isFocused = now
-        invalidateDraw()
-        syncScaleTarget()
-        onFocusChanged?.invoke(now)
-    }
-
-    fun syncScaleTarget() {
-        val target = if (isFocused && enabled) focusScale else 1f
-        if (!isAttached) {
-            currentScaleState.floatValue = target
-            return
-        }
-        if (target == currentScaleState.floatValue && scaleJob?.isActive != true) return
-        scaleJob?.cancel()
-        scaleJob = coroutineScope.launch {
-            val anim = scaleAnim ?: Animatable(currentScaleState.floatValue).also { scaleAnim = it }
-            anim.animateTo(target, animationSpec = FOCUS_SCALE_SPEC) {
-                currentScaleState.floatValue = value
+    if (bg != Color.Transparent && bg != Color.Unspecified) {
+        when (shape) {
+            RectangleShape -> drawRect(color = bg)
+            CircleShape -> drawCircle(color = bg, radius = size.minDimension / 2f)
+            else -> if (cachedOutline != null) {
+                drawOutline(outline = cachedOutline, color = bg)
             }
         }
     }
 
-    override fun onDetach() {
-        scaleJob?.cancel()
-        scaleJob = null
-        super.onDetach()
-    }
+    drawContent()
 
-    override fun MeasureScope.measure(
-        measurable: Measurable,
-        constraints: Constraints
-    ): MeasureResult {
-        val placeable = measurable.measure(constraints)
-        return layout(placeable.width, placeable.height) {
-            placeable.placeWithLayer(0, 0) {
-                val s = currentScaleState.floatValue
-                scaleX = s
-                scaleY = s
-                val nodeShape = shape
-                if (nodeShape !== RectangleShape) {
-                    this.shape = nodeShape
-                    clip = true
+    val borderColor = if (activeFocus) focusedBorderColor else unfocusedBorderColor
+    if (borderColor != Color.Unspecified && borderColor != Color.Transparent) {
+        val strokePx = (if (activeFocus) focusedBorderWidth else borderWidth).toPx()
+        if (strokePx > 0f) {
+            when (shape) {
+                RectangleShape -> {
+                    val half = strokePx / 2f
+                    drawRect(
+                        color = borderColor,
+                        topLeft = Offset(half, half),
+                        size = Size(
+                            (size.width - strokePx).coerceAtLeast(0f),
+                            (size.height - strokePx).coerceAtLeast(0f)
+                        ),
+                        style = Stroke(width = strokePx)
+                    )
                 }
-            }
-        }
-    }
-
-    override fun ContentDrawScope.draw() {
-        val activeFocus = isFocused && enabled
-        val bg = if (activeFocus) focusedContainerColor else containerColor
-        val nodeShape = shape
-        val cachedOutline = if (nodeShape !== RectangleShape && nodeShape !== CircleShape) {
-            nodeShape.createOutline(size, layoutDirection, this)
-        } else {
-            null
-        }
-
-        if (bg != Color.Transparent && bg != Color.Unspecified) {
-            when (nodeShape) {
-                RectangleShape -> drawRect(color = bg)
-                CircleShape -> drawCircle(color = bg, radius = size.minDimension / 2f)
+                CircleShape -> {
+                    val radius = ((size.minDimension - strokePx) / 2f).coerceAtLeast(0f)
+                    drawCircle(
+                        color = borderColor,
+                        radius = radius,
+                        style = Stroke(width = strokePx)
+                    )
+                }
                 else -> if (cachedOutline != null) {
-                    drawOutline(outline = cachedOutline, color = bg)
-                }
-            }
-        }
-
-        drawContent()
-
-        val borderColor = if (activeFocus) focusedBorderColor else unfocusedBorderColor
-        if (borderColor != Color.Unspecified && borderColor != Color.Transparent) {
-            val strokePx = (if (activeFocus) focusedBorderWidth else borderWidth).toPx()
-            if (strokePx > 0f) {
-                when (nodeShape) {
-                    RectangleShape -> {
-                        val half = strokePx / 2f
-                        drawRect(
+                    val clipOutlinePath = Path().apply { addOutline(cachedOutline) }
+                    clipPath(clipOutlinePath) {
+                        drawOutline(
+                            outline = cachedOutline,
                             color = borderColor,
-                            topLeft = Offset(half, half),
-                            size = Size(
-                                (size.width - strokePx).coerceAtLeast(0f),
-                                (size.height - strokePx).coerceAtLeast(0f)
-                            ),
-                            style = Stroke(width = strokePx)
+                            style = Stroke(width = strokePx * 2f)
                         )
-                    }
-                    CircleShape -> {
-                        val radius = ((size.minDimension - strokePx) / 2f).coerceAtLeast(0f)
-                        drawCircle(
-                            color = borderColor,
-                            radius = radius,
-                            style = Stroke(width = strokePx)
-                        )
-                    }
-                    else -> if (cachedOutline != null) {
-                        val clipOutlinePath = Path().apply { addOutline(cachedOutline) }
-                        clipPath(clipOutlinePath) {
-                            drawOutline(
-                                outline = cachedOutline,
-                                color = borderColor,
-                                style = Stroke(width = strokePx * 2f)
-                            )
-                        }
                     }
                 }
             }

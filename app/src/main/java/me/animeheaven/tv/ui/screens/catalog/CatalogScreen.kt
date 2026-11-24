@@ -100,14 +100,14 @@ fun CatalogScreen(
                 val firstItemFocusRequester = remember { FocusRequester() }
                 var hasFocusedFirstItem by remember { mutableStateOf(false) }
                 var isFirstItemFocused by remember { mutableStateOf(false) }
-                LaunchedEffect(state.items.isNotEmpty()) {
+                LaunchedEffect(state.items.firstOrNull()?.id) {
                     if (state.items.isNotEmpty() && !hasFocusedFirstItem) {
-                        repeat(8) {
+                        repeat(15) {
                             if (isFirstItemFocused) {
                                 hasFocusedFirstItem = true
                                 return@LaunchedEffect
                             }
-                            delay(120L)
+                            delay(150L)
                             if (isFirstItemFocused) {
                                 hasFocusedFirstItem = true
                                 return@LaunchedEffect

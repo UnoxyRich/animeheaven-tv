@@ -115,11 +115,11 @@ fun HomeScreen(
             feed != null -> {
                 val heroFocusRequester = remember { FocusRequester() }
                 var isHeroPrimaryFocused by remember { mutableStateOf(false) }
-                LaunchedEffect(feed.banners.isNotEmpty()) {
+                LaunchedEffect(feed.banners.firstOrNull()?.animeId) {
                     if (feed.banners.isNotEmpty()) {
-                        repeat(8) {
+                        repeat(15) {
                             if (isHeroPrimaryFocused) return@LaunchedEffect
-                            delay(120L)
+                            delay(150L)
                             if (isHeroPrimaryFocused) return@LaunchedEffect
                             runCatching { heroFocusRequester.requestFocus() }
                         }

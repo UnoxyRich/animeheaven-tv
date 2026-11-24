@@ -32,8 +32,8 @@ class TvUiSmokeTest {
         waitForText("Search", timeoutMs = 15_000L)
         composeRule.onNodeWithContentDescription("Settings & Themes").assertIsDisplayed()
         waitForText("Watch Now", timeoutMs = 25_000L)
-        waitForImagesLoaded(minCount = 5, timeoutMs = 15_000L)
-        settle(800L)
+        waitForImagesLoaded(minCount = 7, timeoutMs = 15_000L)
+        settle(1_000L)
         saveScreenshot("01-tv-home")
 
         // New Releases tab

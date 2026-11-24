@@ -82,8 +82,8 @@ fun SettingsScreen(
     var statusBanner by remember { mutableStateOf<String?>(null) }
     var cacheSummary by remember { mutableStateOf("Calculating...") }
     var pendingClear by remember { mutableStateOf<ClearTarget?>(null) }
-    val selectedThemeFocusRequester = remember { FocusRequester() }
-    var isSelectedThemeFocused by remember { mutableStateOf(false) }
+    val themeFocusRequesters = remember { AhThemeId.entries.associateWith { FocusRequester() } }
+    var isInitialThemeFocused by remember { mutableStateOf(false) }
 
     pendingClear?.let { target ->
         val history = target == ClearTarget.HISTORY
@@ -162,11 +162,12 @@ fun SettingsScreen(
     }
 
     LaunchedEffect(Unit) {
-        repeat(8) {
-            if (isSelectedThemeFocused) return@LaunchedEffect
+        val initialRequester = themeFocusRequesters[settings.themeId] ?: return@LaunchedEffect
+        repeat(12) {
+            if (isInitialThemeFocused) return@LaunchedEffect
             delay(120L)
-            if (isSelectedThemeFocused) return@LaunchedEffect
-            runCatching { selectedThemeFocusRequester.requestFocus() }
+            if (isInitialThemeFocused) return@LaunchedEffect
+            runCatching { initialRequester.requestFocus() }
         }
     }
 
@@ -247,29 +248,25 @@ fun SettingsScreen(
                                     rowThemes.forEach { theme ->
                                         val preview = paletteFor(theme)
                                         val selected = settings.themeId == theme
+                                        val cardFocusRequester = themeFocusRequesters.getValue(theme)
                                         AhStaticFocusableBox(
                                             onClick = {
                                                 settingsStore.setTheme(theme)
-                                                statusBanner = "Theme: ${theme.displayName}"
+                                                runCatching { cardFocusRequester.requestFocus() }
                                             },
                                             modifier = Modifier
                                                 .weight(1f)
                                                 .semantics { this.selected = selected }
-                                                .then(
-                                                    if (selected) {
-                                                        Modifier.focusRequester(selectedThemeFocusRequester)
-                                                    } else {
-                                                        Modifier
-                                                    }
-                                                ),
+                                                .focusRequester(cardFocusRequester),
                                             shape = AhShape3,
                                             containerColor = palette.surfaceElevated,
+                                            focusedContainerColor = palette.surfaceFocused,
                                             unfocusedBorderColor = if (selected) palette.crimson else palette.borderSubtle,
                                             borderWidth = if (selected) 2.dp else 1.dp,
                                             focusedBorderColor = if (selected) palette.crimson else palette.focusBorder,
                                             focusedBorderWidth = 2.5.dp,
                                             onFocusStateChanged = { focused ->
-                                                if (focused && selected) isSelectedThemeFocused = true
+                                                if (focused && selected) isInitialThemeFocused = true
                                             }
                                         ) {
                                             Row(
@@ -606,12 +603,13 @@ fun SettingsScreen(
             Box(
                 modifier = Modifier
                     .clip(AhShape20)
-                    .background(palette.crimson)
+                    .background(palette.focusContainer)
+                    .border(1.dp, palette.borderSubtle, AhShape20)
                     .padding(horizontal = 18.dp, vertical = 8.dp)
             ) {
                 Text(
                     text = statusBanner.orEmpty(),
-                    color = Color.White,
+                    color = palette.onFocusContainer,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
                 )
