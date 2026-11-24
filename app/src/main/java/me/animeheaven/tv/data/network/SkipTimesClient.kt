@@ -146,7 +146,8 @@ object SkipTimesParser {
 
 class SkipTimesClient(
     baseOkHttpClient: OkHttpClient,
-    private val webCacheDao: WebCacheDao? = null
+    private val webCacheDao: WebCacheDao? = null,
+    private val artworkResolver: AnimeArtworkResolver? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -229,6 +230,7 @@ class SkipTimesClient(
     }
 
     private suspend fun resolveMalIdCoalesced(rawTitle: String, normalized: String): Int? {
+        if (artworkResolver != null) return artworkResolver.resolveMalId(rawTitle)
         val memCached = malIdCache[normalized]
         if (memCached != null) {
             return if (memCached > 0) memCached else null

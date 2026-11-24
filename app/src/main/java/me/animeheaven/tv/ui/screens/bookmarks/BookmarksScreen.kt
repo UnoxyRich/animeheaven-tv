@@ -203,6 +203,10 @@ fun BookmarksScreen(
                                                 url = bm.coverUrl,
                                                 contentDescription = bm.title,
                                                 targetSize = ImageTargetSize.STANDARD_CARD,
+                                                artwork = me.animeheaven.tv.data.model.ArtworkLookupRequest(
+                                                    bm.animeId, bm.title, priority = me.animeheaven.tv.data.model.ArtworkPriority.CACHED_ONLY
+                                                ),
+                                                nativeLandscapeFirst = true,
                                                 modifier = Modifier.fillMaxSize()
                                             )
                                             if (bm.lastEpisodeLabel.isNotBlank()) {

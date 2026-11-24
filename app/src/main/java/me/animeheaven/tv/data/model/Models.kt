@@ -114,7 +114,8 @@ data class AnimeDetail(
     val countdownLabel: String?,
     val episodes: List<EpisodeItem>,
     val relatedShows: List<AnimeCard>,
-    val similarShows: List<AnimeCard>
+    val similarShows: List<AnimeCard>,
+    val landscapeCoverUrl: String? = null
 )
 
 @Immutable

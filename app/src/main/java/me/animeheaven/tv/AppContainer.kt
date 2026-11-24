@@ -26,6 +26,9 @@ import me.animeheaven.tv.data.cache.ImageTargetSize
 import me.animeheaven.tv.data.cache.VideoCacheManager
 import me.animeheaven.tv.data.local.AppDatabase
 import me.animeheaven.tv.data.local.AppSettingsStore
+import me.animeheaven.tv.data.model.ArtworkImageHeaders
+import me.animeheaven.tv.data.model.PreloadMode
+import me.animeheaven.tv.data.network.AnimeArtworkResolver
 import me.animeheaven.tv.data.network.AnimeHeavenClient
 import me.animeheaven.tv.data.network.CachedDns
 import me.animeheaven.tv.data.network.NetworkPolicy
@@ -60,8 +63,15 @@ class AppContainer(context: Context) {
     }
     val repository: AnimeHeavenRepository by repositoryLazy
 
+    private val artworkResolverLazy = lazy {
+        AnimeArtworkResolver(okHttpClient, database.webCacheDao(), appScope) {
+            networkPolicy.effectivePreloadMode() == PreloadMode.DATA_SAVER
+        }
+    }
+    val artworkResolver: AnimeArtworkResolver by artworkResolverLazy
+
     private val skipTimesClientLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        SkipTimesClient(okHttpClient, database.webCacheDao())
+        SkipTimesClient(okHttpClient, database.webCacheDao(), artworkResolver)
     }
     val skipTimesClient: SkipTimesClient by skipTimesClientLazy
 
@@ -89,7 +99,13 @@ class AppContainer(context: Context) {
                     .build()
             }
             .components {
-                add(OkHttpNetworkFetcherFactory(callFactory = { okHttpClient }))
+                val imageClient = okHttpClient.newBuilder().cache(null).followSslRedirects(false)
+                    .addNetworkInterceptor { chain ->
+                        val request = chain.request().newBuilder().removeHeader("Referer")
+                        ArtworkImageHeaders.referer(chain.request().url.host)?.let { request.header("Referer", it) }
+                        chain.proceed(request.build())
+                    }.build()
+                add(OkHttpNetworkFetcherFactory(callFactory = { imageClient }))
             }
             .allowRgb565(true)
             .crossfade(100)
@@ -117,7 +133,11 @@ class AppContainer(context: Context) {
      */
     fun warmUpOnStartup() {
         startupJob = appScope.launch {
-            if (networkPolicy.shouldPreloadHomeDetails()) NetworkPreconnector.preconnectAsync(okHttpClient)
+            launch { artworkResolver.hydrateRecentFromDisk() }
+            if (networkPolicy.shouldPreloadHomeDetails()) {
+                NetworkPreconnector.preconnectAsync(okHttpClient)
+                NetworkPreconnector.preconnectCdnHostsAsync(okHttpClient, listOf("graphql.anilist.co", "api.ani.zip"))
+            }
 
             val fastFeed = runCatching { repository.hydrateHomeFastSync() }.getOrNull()
             if (fastFeed != null) {
@@ -165,6 +185,7 @@ class AppContainer(context: Context) {
             }
         }
         if (aggressive || moderate) {
+            if (artworkResolverLazy.isInitialized()) artworkResolver.trimMemory()
             if (repositoryLazy.isInitialized()) repository.trimMemory(aggressive = aggressive)
             if (skipTimesClientLazy.isInitialized()) {
                 runCatching { skipTimesClient.trimMemory(aggressive = aggressive) }
@@ -185,7 +206,7 @@ class AppContainer(context: Context) {
 
     private suspend fun clearCachesOnDisk() {
         if (skipTimesClientLazy.isInitialized()) skipTimesClient.clearMemoryCache()
-        repository.clearWebPageCache()
+        artworkResolver.withCacheCleared { repository.clearWebPageCache() }
         videoCacheManager.clearAll()
         runCatching {
             if (imageLoaderLazy.isInitialized()) {

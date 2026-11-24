@@ -52,9 +52,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -63,18 +60,18 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
-import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
-import coil3.request.allowRgb565
-import coil3.size.Precision
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.delay
 import me.animeheaven.tv.data.cache.ImageTargetSize
 import me.animeheaven.tv.data.model.AnimeCard
+import me.animeheaven.tv.data.model.ArtworkLookupRequest
+import me.animeheaven.tv.data.model.ArtworkPriority
+import me.animeheaven.tv.data.model.ArtworkSlot
 import me.animeheaven.tv.data.model.BannerItem
 import me.animeheaven.tv.data.model.ContinueWatchingItem
 import me.animeheaven.tv.data.model.FeedViewMode
 import me.animeheaven.tv.data.model.RankDirection
+import me.animeheaven.tv.data.network.SkipTimesParser
 import me.animeheaven.tv.ui.theme.LocalAhPalette
 
 private val HERO_LEFT_SCRIM = Brush.horizontalGradient(
@@ -124,33 +121,6 @@ fun <T> List<T>.toGridRows(columns: Int, keyOf: (T) -> String): List<GridRow<T>>
 
 object AhImageLoadTracker {
     val loadedCount = AtomicInteger(0)
-}
-
-@Composable
-fun AhCoverImage(
-    url: String,
-    contentDescription: String?,
-    modifier: Modifier = Modifier,
-    targetSize: ImageTargetSize = ImageTargetSize.STANDARD_CARD
-) {
-    val context = LocalContext.current
-    val palette = LocalAhPalette.current
-    val request = remember(url, targetSize) {
-        ImageRequest.Builder(context)
-            .data(url)
-            .size(targetSize.widthPx, targetSize.heightPx)
-            .precision(Precision.INEXACT)
-            .allowRgb565(true)
-            .build()
-    }
-    AsyncImage(
-        model = request,
-        contentDescription = contentDescription,
-        contentScale = ContentScale.Crop,
-        filterQuality = FilterQuality.Medium,
-        onSuccess = { AhImageLoadTracker.loadedCount.incrementAndGet() },
-        modifier = modifier.background(palette.surfaceElevated)
-    )
 }
 
 /**
@@ -210,6 +180,8 @@ fun HeroBannerCarousel(
                 url = slide.bannerImageUrl,
                 contentDescription = slide.title,
                 targetSize = ImageTargetSize.HERO_BANNER,
+                artwork = ArtworkLookupRequest(slide.animeId, slide.title, priority = ArtworkPriority.HIGH),
+                slot = ArtworkSlot.WIDE_BANNER,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -506,6 +478,9 @@ fun ContinueWatchingRow(
                                 url = item.coverUrl,
                                 contentDescription = item.animeTitle,
                                 targetSize = ImageTargetSize.CONTINUE_CARD,
+                                artwork = ArtworkLookupRequest(item.animeId, item.animeTitle, priority = ArtworkPriority.HIGH),
+                                episodeNumber = SkipTimesParser.parseEpisodeNumber(item.targetEpisodeLabel),
+                                nativeLandscapeFirst = true,
                                 modifier = Modifier.fillMaxSize()
                             )
                             Box(
@@ -738,7 +713,7 @@ fun PopularHorizontalStrip(
                         onClick = { onAnimeClick(anime.id) },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
-                            .width(112.dp)
+                            .width(104.dp)
                             .height(156.dp),
                         shape = AhShape10,
                         containerColor = palette.surfaceElevated,
@@ -755,6 +730,8 @@ fun PopularHorizontalStrip(
                                 url = anime.coverUrl,
                                 contentDescription = anime.title,
                                 targetSize = ImageTargetSize.POPULAR_CARD,
+                                artwork = ArtworkLookupRequest(anime.id, anime.title, anime.japaneseTitle, priority = ArtworkPriority.FEATURED),
+                                slot = ArtworkSlot.PORTRAIT_2_3,
                                 modifier = Modifier.fillMaxSize()
                             )
 
@@ -945,6 +922,8 @@ fun ScheduleListCard(
                         url = item.coverUrl,
                         contentDescription = item.title,
                         targetSize = ImageTargetSize.STANDARD_CARD,
+                        artwork = ArtworkLookupRequest(item.id, item.title, priority = ArtworkPriority.CACHED_ONLY),
+                        nativeLandscapeFirst = true,
                         modifier = Modifier.fillMaxSize()
                     )
                     if (item.episodeLabel.isNotBlank()) {
@@ -1062,6 +1041,8 @@ fun ScheduleGridCard(
                     url = item.coverUrl,
                     contentDescription = item.title,
                     targetSize = ImageTargetSize.STANDARD_CARD,
+                    artwork = ArtworkLookupRequest(item.id, item.title, priority = ArtworkPriority.CACHED_ONLY),
+                    nativeLandscapeFirst = true,
                     modifier = Modifier.fillMaxSize()
                 )
                 Box(
@@ -1168,6 +1149,8 @@ fun SimilarShowCard(
                 url = item.coverUrl,
                 contentDescription = item.title,
                 targetSize = ImageTargetSize.STANDARD_CARD,
+                artwork = ArtworkLookupRequest(item.id, item.title, priority = ArtworkPriority.CACHED_ONLY),
+                nativeLandscapeFirst = true,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)

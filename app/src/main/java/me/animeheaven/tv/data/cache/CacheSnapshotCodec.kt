@@ -129,6 +129,7 @@ object CacheSnapshotCodec {
         writeStrField("jp", detail.japaneseTitle)
         writeStrField("banner", detail.bannerUrl)
         writeStrField("poster", detail.posterUrl)
+        writeStrField("landscape", detail.landscapeCoverUrl)
         writeStrField("synopsis", detail.synopsis)
         writeArrayField("tags", detail.tags) { writeJsonString(it) }
         writeStrField("epLabel", detail.episodesLabel)
@@ -154,6 +155,7 @@ object CacheSnapshotCodec {
         var jp = ""
         var banner: String? = null
         var poster = ""
+        var landscape: String? = null
         var synopsis = ""
         var tags: List<String> = emptyList()
         var epLabel = ""
@@ -171,6 +173,7 @@ object CacheSnapshotCodec {
                 "jp" -> jp = r.readNullableString().orEmpty()
                 "banner" -> banner = r.readNullableString()
                 "poster" -> poster = r.readNullableString().orEmpty()
+                "landscape" -> landscape = r.readNullableString()
                 "synopsis" -> synopsis = r.readNullableString().orEmpty()
                 "tags" -> tags = r.readListNotNull { r.readNullableString() }
                 "epLabel" -> epLabel = r.readNullableString().orEmpty()
@@ -198,7 +201,8 @@ object CacheSnapshotCodec {
             countdownLabel = countdown,
             episodes = episodes,
             relatedShows = related,
-            similarShows = similar
+            similarShows = similar,
+            landscapeCoverUrl = landscape
         )
     }.getOrNull()
 

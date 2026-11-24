@@ -58,6 +58,9 @@ import kotlinx.coroutines.delay
 import me.animeheaven.tv.data.cache.ImageTargetSize
 import me.animeheaven.tv.data.local.WatchProgressEntity
 import me.animeheaven.tv.data.model.AnimeCard
+import me.animeheaven.tv.data.model.ArtworkLookupRequest
+import me.animeheaven.tv.data.model.ArtworkPriority
+import me.animeheaven.tv.data.model.ArtworkSlot
 import me.animeheaven.tv.data.model.EpisodeItem
 import me.animeheaven.tv.ui.components.AhCoverImage
 import me.animeheaven.tv.ui.components.AhErrorBox
@@ -155,7 +158,8 @@ fun AnimeDetailScreen(
                     1.0f to Color.Transparent
                 )
             }
-            val coverForPlayer = detail.bannerUrl ?: detail.posterUrl
+            val artwork = ArtworkLookupRequest(detail.id, detail.title, detail.japaneseTitle,
+                detail.year.take(4).toIntOrNull(), ArtworkPriority.HIGH)
             val listState = rememberLazyListState(
                 prefetchStrategy = remember { LazyListPrefetchStrategy(nestedPrefetchItemCount = 4) }
             )
@@ -174,9 +178,10 @@ fun AnimeDetailScreen(
                                 .height(356.dp)
                         ) {
                             AhCoverImage(
-                                url = detail.bannerUrl?.takeIf { it.isNotBlank() } ?: detail.posterUrl,
+                                url = detail.landscapeCoverUrl ?: detail.bannerUrl ?: detail.posterUrl,
                                 contentDescription = detail.title,
-                                targetSize = ImageTargetSize.HERO_BANNER,
+                                targetSize = ImageTargetSize.DETAIL_HERO,
+                                artwork = artwork,
                                 modifier = Modifier.fillMaxSize()
                             )
                             Box(modifier = Modifier.fillMaxSize().background(horizontalScrim))
@@ -233,6 +238,8 @@ fun AnimeDetailScreen(
                                     url = detail.posterUrl,
                                     contentDescription = detail.title,
                                     targetSize = ImageTargetSize.DETAIL_POSTER,
+                                    artwork = artwork,
+                                    slot = ArtworkSlot.PORTRAIT_2_3,
                                     modifier = Modifier
                                         .width(148.dp)
                                         .aspectRatio(2f / 3f)
@@ -372,7 +379,7 @@ fun AnimeDetailScreen(
                                                         action.episodeKey,
                                                         detail.id,
                                                         detail.title,
-                                                        coverForPlayer
+                                                        viewModel.landscapeCover(detail)
                                                     )
                                                 },
                                                 modifier = Modifier.focusRequester(primaryFocusRequester),
@@ -570,7 +577,7 @@ fun AnimeDetailScreen(
                                                 ep.key,
                                                 detail.id,
                                                 detail.title,
-                                                coverForPlayer
+                                                viewModel.landscapeCover(detail)
                                             )
                                         },
                                         modifier = Modifier.weight(1f)

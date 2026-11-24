@@ -51,6 +51,7 @@ object AnimeHeavenParser {
     private val EVAL_SIMILAR_NAME: Evaluator = QueryParser.parse(".similarname a, .similarname")
     private val EVAL_DETAIL_BANNER: Evaluator = QueryParser.parse("div.banner img.bannerimg")
     private val EVAL_DETAIL_POSTER: Evaluator = QueryParser.parse("div.infoimg img.posterimg")
+    private val EVAL_DETAIL_COVER: Evaluator = QueryParser.parse("meta[property=og:image]")
     private val EVAL_INFO_TITLE: Evaluator = QueryParser.parse("div.infotitle")
     private val EVAL_INFO_TITLE_JP: Evaluator = QueryParser.parse("div.infotitlejp")
     private val EVAL_INFO_DES: Evaluator = QueryParser.parse("div.infodes")
@@ -242,6 +243,8 @@ object AnimeHeavenParser {
         val bannerUrl = normalizeUrl(doc.selectFirst(EVAL_DETAIL_BANNER)?.attr("src"))
             .takeIf { it.isNotBlank() }
         val posterUrl = normalizeUrl(doc.selectFirst(EVAL_DETAIL_POSTER)?.attr("src"))
+        val landscapeCover = normalizeUrl(doc.selectFirst(EVAL_DETAIL_COVER)?.attr("content"))
+            .takeIf { it.isNotBlank() && it != bannerUrl && it != posterUrl }
         val title = doc.selectFirst(EVAL_INFO_TITLE)?.text()?.trim().orEmpty()
         val japaneseTitle = doc.selectFirst(EVAL_INFO_TITLE_JP)?.text()?.trim().orEmpty()
             .let { if (it == "-") "" else it }
@@ -310,7 +313,8 @@ object AnimeHeavenParser {
             countdownLabel = countdownLabel,
             episodes = episodes,
             relatedShows = relatedShows,
-            similarShows = similarShows
+            similarShows = similarShows,
+            landscapeCoverUrl = landscapeCover
         )
     }
 

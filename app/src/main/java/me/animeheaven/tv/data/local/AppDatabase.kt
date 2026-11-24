@@ -156,6 +156,9 @@ interface WebCacheDao {
     )
     suspend fun getRecentDetails(limit: Int = 12): List<WebCacheEntity>
 
+    @Query("SELECT * FROM web_cache WHERE cacheKey LIKE 'artwork:ah:%' AND fetchedAt >= :since ORDER BY fetchedAt DESC LIMIT :limit")
+    suspend fun getRecentArtwork(since: Long, limit: Int = 128): List<WebCacheEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: WebCacheEntity)
 

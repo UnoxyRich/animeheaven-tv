@@ -15,6 +15,8 @@ import kotlinx.coroutines.launch
 import me.animeheaven.tv.data.cache.AnimePreloader
 import me.animeheaven.tv.data.local.WatchProgressEntity
 import me.animeheaven.tv.data.model.AnimeDetail
+import me.animeheaven.tv.data.model.ArtworkLookupRequest
+import me.animeheaven.tv.data.network.AnimeArtworkResolver
 import me.animeheaven.tv.data.model.EpisodeItem
 import me.animeheaven.tv.data.repository.AnimeHeavenRepository
 import me.animeheaven.tv.data.repository.CachedResource
@@ -50,7 +52,8 @@ private data class DetailBaseState(
 class DetailViewModel(
     private val repository: AnimeHeavenRepository,
     val animeId: String,
-    private val preloader: AnimePreloader? = null
+    private val preloader: AnimePreloader? = null,
+    private val artworkResolver: AnimeArtworkResolver? = null
 ) : ViewModel() {
 
     private val baseState = MutableStateFlow(DetailBaseState())
@@ -146,13 +149,17 @@ class DetailViewModel(
         baseState.update { it.copy(sortOldestFirst = !it.sortOldestFirst) }
     }
 
+    fun landscapeCover(detail: AnimeDetail): String =
+        artworkResolver?.memory(ArtworkLookupRequest(detail.id, detail.title, detail.japaneseTitle))?.landscapeFanartUrl
+            ?: detail.landscapeCoverUrl.orEmpty()
+
     fun toggleBookmark() {
         val detail = baseState.value.detail ?: return
         viewModelScope.launch {
             repository.toggleBookmark(
                 animeId = detail.id,
                 title = detail.title,
-                coverUrl = detail.bannerUrl ?: detail.posterUrl,
+                coverUrl = landscapeCover(detail),
                 lastEpisodeLabel = detail.episodes.firstOrNull()?.numberLabel ?: detail.episodesLabel
             )
         }
