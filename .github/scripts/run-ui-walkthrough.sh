@@ -10,6 +10,25 @@ capture_artifacts() {
 mkdir -p screenshots ui-test-results
 trap capture_artifacts EXIT
 
+# The API 36 TV emulator can briefly drop ADB just after sys.boot_completed
+# becomes 1. Wait for the package manager and several consecutive shell replies.
+stable=0
+for attempt in {1..30}; do
+  if [[ "$(timeout 5s adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == 1 ]] \
+    && timeout 8s adb shell pm path android >/dev/null 2>&1; then
+    stable=$((stable + 1))
+    [[ $stable -lt 3 ]] || break
+  else
+    stable=0
+    if (( attempt % 5 == 0 )); then timeout 5s adb reconnect offline || true; fi
+  fi
+  sleep 2
+done
+if [[ $stable -lt 3 ]]; then
+  echo "Android TV emulator did not stabilize after boot" >&2
+  exit 1
+fi
+
 timeout 30s adb shell mkdir -p /data/local/tmp/ci-screenshots
 timeout 90s adb install -t app/build/outputs/apk/debug/app-debug.apk
 timeout 90s adb install -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
