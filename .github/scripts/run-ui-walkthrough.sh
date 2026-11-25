@@ -29,6 +29,10 @@ if [[ $stable -lt 3 ]]; then
   exit 1
 fi
 
+timeout 10s adb shell settings put global window_animation_scale 0.0 || true
+timeout 10s adb shell settings put global transition_animation_scale 0.0 || true
+timeout 10s adb shell settings put global animator_duration_scale 0.0 || true
+
 timeout 30s adb shell mkdir -p /data/local/tmp/ci-screenshots
 timeout 90s adb install -t app/build/outputs/apk/debug/app-debug.apk
 timeout 90s adb install -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
