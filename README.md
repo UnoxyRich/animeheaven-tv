@@ -4,6 +4,13 @@ Native Jetpack Compose + Media3 Android TV application for browsing and streamin
 
 > **Companion Repository**: For the phone and tablet touch edition (`me.animeheaven.android`), see the sibling repository `animeheaven-android`. Both repositories share the core data, Room persistence, HTML parsing, predictive preloading, and multi-mirror Media3 video caching engine while tailoring their manifests, UI chrome, navigation, search input, and player interactions to their respective form factors.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots.jpg" alt="AnimeHeaven TV Screenshots — Home, Detail, Search Keyboard, and Settings" width="720" />
+</p>
+<p align="center"><sub>Home (Cinema Dark) · Anime Detail (Classic Light) · D-Pad Search Keyboard · Settings &amp; 8 Themes (Midnight Indigo)</sub></p>
+
 ---
 
 ## Key Capabilities
