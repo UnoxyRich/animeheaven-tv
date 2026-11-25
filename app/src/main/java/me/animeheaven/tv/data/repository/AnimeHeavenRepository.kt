@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import me.animeheaven.tv.data.cache.CacheSnapshotCodec
+import me.animeheaven.tv.data.cache.EpisodeVideoIndex
 import me.animeheaven.tv.data.cache.LruCacheMap
 import me.animeheaven.tv.data.local.AppDatabase
 import me.animeheaven.tv.data.local.BookmarkEntity
@@ -99,11 +100,31 @@ class AnimeHeavenRepository(
     private val cachedDetails = LruCacheMap<String, CachedEntry<AnimeDetail>>(MAX_DETAIL_CACHE)
     private val cachedStreams = LruCacheMap<String, CachedEntry<EpisodeStream>>(MAX_STREAM_CACHE)
     private val cachedFastSearch = LruCacheMap<String, CachedEntry<List<FastSearchItem>>>(MAX_FAST_SEARCH_CACHE)
+    private val progressByEpisode = ConcurrentHashMap<String, WatchProgressEntity>()
+    private val latestProgressByAnime = ConcurrentHashMap<String, WatchProgressEntity>()
 
     private val _seasonHeader = MutableStateFlow<Pair<String?, String?>?>(null)
     val seasonHeader: StateFlow<Pair<String?, String?>?> = _seasonHeader.asStateFlow()
 
     fun peekCachedHomeFeed(): HomeFeed? = cachedHomeFeed?.value
+
+    fun peekCachedDetail(animeId: String): AnimeDetail? = cachedDetails[animeId]?.value
+
+    fun peekCachedStream(episodeKey: String): EpisodeStream? = cachedStreams[episodeKey]?.value
+
+    fun isCachedStreamStale(episodeKey: String): Boolean {
+        val entry = cachedStreams[episodeKey] ?: return true
+        return entry.isStale(TTL_GATE_MS)
+    }
+
+    fun peekSavedProgress(episodeKey: String): WatchProgressEntity? = progressByEpisode[episodeKey]
+
+    fun peekLatestProgressForAnime(animeId: String): WatchProgressEntity? = latestProgressByAnime[animeId]
+
+    fun peekResumePositionMs(episodeKey: String): Long {
+        val saved = progressByEpisode[episodeKey] ?: return 0L
+        return resolveResumePositionMs(saved.positionMs, saved.durationMs)
+    }
 
     fun hasFreshDetailInMemory(animeId: String): Boolean {
         val entry = cachedDetails[animeId] ?: return false
@@ -391,7 +412,13 @@ class AnimeHeavenRepository(
                     webCacheDao.getByKeys(listOf(KEY_HOME, "chart:new", "chart:popular"))
                 }
                 val detailsDeferred = async {
-                    webCacheDao.getRecentDetails(12)
+                    webCacheDao.getRecentDetails(24)
+                }
+                val streamsDeferred = async {
+                    webCacheDao.getRecentStreams(48)
+                }
+                val recentProgressDeferred = async {
+                    watchProgressDao.getRecentOnce(128)
                 }
                 val progressDeferred = async {
                     watchProgressDao.getLatestPerAnimeOnce(MIN_RESUME_THRESHOLD_MS)
@@ -471,9 +498,68 @@ class AnimeHeavenRepository(
                     }
                 }
 
+                for (streamRow in streamsDeferred.await()) {
+                    val epKey = streamRow.cacheKey.removePrefix("gate:")
+                    if (epKey.isNotBlank() && !cachedStreams.containsKey(epKey)) {
+                        decodeDbRow(
+                            row = streamRow,
+                            deserializer = CacheSnapshotCodec::decodeEpisodeStream,
+                            parser = { AnimeHeavenParser.parseGatePage(epKey, it) }
+                        )?.takeIf { it.videoSources.isNotEmpty() }?.let { stream ->
+                            cachedStreams[epKey] = CachedEntry(stream, streamRow.fetchedAt)
+                        }
+                    }
+                }
+
+                for (prog in recentProgressDeferred.await()) {
+                    progressByEpisode[prog.episodeKey] = prog
+                    if (prog.animeId.isNotBlank()) {
+                        latestProgressByAnime.merge(prog.animeId, prog) { old, incoming ->
+                            if (incoming.updatedAt >= old.updatedAt) incoming else old
+                        }
+                    }
+                }
+
                 val continueItems = computeContinueWatchingList(progressDeferred.await())
                 warmedHome to continueItems
             }
+        }
+
+    suspend fun saveEpisodeVideoIndex(index: EpisodeVideoIndex) = withContext(Dispatchers.IO) {
+        if (index.episodeKey.isBlank() || index.contentLength <= 0L) return@withContext
+        val generation = cacheGeneration
+        if (clearingCache) return@withContext
+        runCatchingCancellable {
+            val json = CacheSnapshotCodec.encodeEpisodeVideoIndex(index)
+            if (!clearingCache && generation == cacheGeneration) {
+                webCacheDao.upsert(
+                    WebCacheEntity(
+                        cacheKey = "vmeta:${index.episodeKey}",
+                        payload = "",
+                        fetchedAt = index.updatedAtMs.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                        parsedJson = json
+                    )
+                )
+            }
+        }
+    }
+
+    suspend fun loadRecentVideoIndices(limit: Int = 128): List<EpisodeVideoIndex> =
+        withContext(Dispatchers.IO) {
+            runCatchingCancellable {
+                webCacheDao.getRecentVideoMeta(limit).mapNotNull { row ->
+                    row.parsedJson?.let(CacheSnapshotCodec::decodeEpisodeVideoIndex)
+                }
+            }.getOrDefault(emptyList())
+        }
+
+    suspend fun loadEpisodeVideoIndex(episodeKey: String): EpisodeVideoIndex? =
+        withContext(Dispatchers.IO) {
+            if (episodeKey.isBlank()) return@withContext null
+            runCatchingCancellable {
+                webCacheDao.get("vmeta:$episodeKey")?.parsedJson
+                    ?.let(CacheSnapshotCodec::decodeEpisodeVideoIndex)
+            }.getOrNull()
         }
 
     suspend fun getBookmarkIdsSnapshot(): List<String> = withContext(Dispatchers.IO) {
@@ -752,8 +838,20 @@ class AnimeHeavenRepository(
         }
     }
 
+    suspend fun getSavedProgress(episodeKey: String): WatchProgressEntity? {
+        progressByEpisode[episodeKey]?.let { return it }
+        val saved = watchProgressDao.getByEpisodeKey(episodeKey) ?: return null
+        progressByEpisode[episodeKey] = saved
+        if (saved.animeId.isNotBlank()) {
+            latestProgressByAnime.merge(saved.animeId, saved) { old, incoming ->
+                if (incoming.updatedAt >= old.updatedAt) incoming else old
+            }
+        }
+        return saved
+    }
+
     suspend fun getSavedPositionMs(episodeKey: String): Long {
-        val saved = watchProgressDao.getByEpisodeKey(episodeKey) ?: return 0L
+        val saved = getSavedProgress(episodeKey) ?: return 0L
         return resolveResumePositionMs(saved.positionMs, saved.durationMs)
     }
 
@@ -771,24 +869,27 @@ class AnimeHeavenRepository(
     ) {
         if (animeId.isBlank()) return
         val watched = forceWatched || isEpisodeWatched(positionMs, durationMs)
-        watchProgressDao.upsert(
-            WatchProgressEntity(
-                episodeKey = episodeKey,
-                animeId = animeId,
-                animeTitle = animeTitle,
-                coverUrl = coverUrl,
-                episodeLabel = episodeLabel,
-                positionMs = positionMs.coerceAtLeast(0L),
-                durationMs = durationMs.coerceAtLeast(0L),
-                isWatched = watched,
-                nextEpisodeKey = nextEpisodeKey,
-                nextEpisodeLabel = nextEpisodeLabel,
-                updatedAt = System.currentTimeMillis()
-            )
+        val entity = WatchProgressEntity(
+            episodeKey = episodeKey,
+            animeId = animeId,
+            animeTitle = animeTitle,
+            coverUrl = coverUrl,
+            episodeLabel = episodeLabel,
+            positionMs = positionMs.coerceAtLeast(0L),
+            durationMs = durationMs.coerceAtLeast(0L),
+            isWatched = watched,
+            nextEpisodeKey = nextEpisodeKey,
+            nextEpisodeLabel = nextEpisodeLabel,
+            updatedAt = System.currentTimeMillis()
         )
+        progressByEpisode[episodeKey] = entity
+        latestProgressByAnime[animeId] = entity
+        watchProgressDao.upsert(entity)
     }
 
     suspend fun clearWatchHistory() {
+        progressByEpisode.clear()
+        latestProgressByAnime.clear()
         watchProgressDao.clearAll()
     }
 
@@ -818,8 +919,8 @@ class AnimeHeavenRepository(
         private const val HOME_SNAPSHOT_FILENAME = "home_snapshot.v1.json"
         private const val MAX_CHART_CACHE = 24
         private const val MAX_GRID_CACHE = 24
-        private const val MAX_DETAIL_CACHE = 64
-        private const val MAX_STREAM_CACHE = 48
+        private const val MAX_DETAIL_CACHE = 128
+        private const val MAX_STREAM_CACHE = 128
         private const val MAX_FAST_SEARCH_CACHE = 100
 
         val TTL_HOME_MS = TimeUnit.MINUTES.toMillis(5)

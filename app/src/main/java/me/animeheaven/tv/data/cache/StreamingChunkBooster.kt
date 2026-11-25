@@ -7,6 +7,7 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.CacheDataSink
 import androidx.media3.datasource.cache.SimpleCache
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.abs
@@ -36,30 +37,36 @@ import okhttp3.Request
 /**
  * Multi-mirror parallel HTTP-Range chunk feeder for Media3 SimpleCache.
  *
- * AnimeHeaven CDN servers throttle single TCP streams (~140-250 KB/s per socket), which sits
- * close to 1080p video bitrates and causes mid-episode rebuffering. Fetching verified equivalent
- * 512 KB byte spans in parallel across throughput-ranked healthy mirrors into RAM first (with
- * zero SimpleCache lock during network I/O, cancellable sockets, instant seek wakeup, and
- * non-faststart MP4 tail moov warmup) eliminates mid-stream stalls and makes Skip OP/seek instant.
+ * Uses [Mp4MoovSeekParser] to assemble faststart or multi-chunk tail `moov` atoms and build
+ * exact `(timeMs -> byteOffset)` keyframe seek tables, pins preloaded hot windows in
+ * [PinnedPriorityCacheEvictor], and feeds active playback immediately at the playhead frontier
+ * with zero blind-spot gaps.
  */
 @OptIn(UnstableApi::class)
 class StreamingChunkBooster(
     private val simpleCache: SimpleCache,
     private val cacheSinkFactory: CacheDataSink.Factory,
     private val videoHttpClient: OkHttpClient,
-    private val mirrorHealthTracker: MirrorHealthTracker? = null
+    private val mirrorHealthTracker: MirrorHealthTracker? = null,
+    private val cacheEvictor: PinnedPriorityCacheEvictor? = null,
+    private val lowRamDevice: Boolean = false,
+    private val onVideoIndexReady: (suspend (EpisodeVideoIndex) -> Unit)? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val slidingAheadWindowBytes: Long =
+        if (lowRamDevice) LOW_RAM_SLIDING_AHEAD_WINDOW_BYTES else SLIDING_AHEAD_WINDOW_BYTES
 
     private class BoostSession(
         val cacheKey: String,
         val mirrors: List<String>,
-        val totalLength: Long
+        val totalLength: Long,
+        @Volatile var videoIndex: EpisodeVideoIndex? = null
     ) {
         val queueMutex = Mutex()
         val inFlightChunks = HashSet<Long>()
         val failedChunkAttempts = ConcurrentHashMap<Long, Int>()
         val wakeup = Channel<Unit>(Channel.CONFLATED)
+        @Volatile var lastDemotedTrailingByte: Long = 0L
     }
 
     @Volatile
@@ -70,6 +77,7 @@ class StreamingChunkBooster(
 
     @Volatile
     private var currentPlayheadMs: Long = 0L
+
     @Volatile
     private var currentBufferedMs: Long = 0L
 
@@ -98,9 +106,9 @@ class StreamingChunkBooster(
     }
 
     /**
-     * Pre-warms initial MP4 header (chunk 0), automatic tail chunk when chunk 0 lacks a `moov`
-     * atom (non-faststart MP4), resume window (or head bytes), and post-OP jump window concurrently
-     * across verified mirrors before playback starts.
+     * Pre-warms chunk 0, complete faststart or multi-chunk tail `moov` atom, parses & persists
+     * an exact [EpisodeVideoIndex], pins the hot window in [cacheEvictor], and fetches the exact
+     * start/resume and post-OP windows concurrently across verified mirrors.
      */
     suspend fun preloadInitialWindows(
         cacheKey: String,
@@ -109,19 +117,133 @@ class StreamingChunkBooster(
         targetBytes: Long,
         resumePositionMs: Long,
         estimatedDurationMs: Long,
-        opEndMs: Long
-    ) {
-        if (mirrors.isEmpty() || totalLength <= 0L || targetBytes <= 0L) return
+        opEndMs: Long,
+        episodeKey: String? = null,
+        existingIndex: EpisodeVideoIndex? = null
+    ): EpisodeVideoIndex? {
+        if (mirrors.isEmpty() || totalLength <= 0L || targetBytes <= 0L) return existingIndex
         val rankedMirrors = mirrorHealthTracker?.rankMirrors(mirrors) ?: mirrors
+        var resolvedIndex = existingIndex
+
+        // Step 1: Ensure chunk 0 is cached & available for MP4 moov inspection.
+        val chunk0Len = minOf(CHUNK_SIZE_BYTES, totalLength)
+        val chunk0Bytes = ensureChunk0Bytes(cacheKey, rankedMirrors, chunk0Len, totalLength)
+        cacheEvictor?.markHotWindow(cacheKey, 0L, chunk0Len)
+
+        // Step 2: Locate and warm the complete MP4 moov box (head or multi-chunk tail) and parse seek index.
+        val moovLoc = if (chunk0Bytes != null) {
+            Mp4MoovSeekParser.inspectTopLevelBoxes(chunk0Bytes, chunk0Bytes.size, totalLength)
+        } else {
+            null
+        }
+        val moovChunks = ArrayList<Long>(4)
+        if (moovLoc != null && moovLoc.size in 16L..Mp4MoovSeekParser.MAX_MOOV_PARSE_BYTES) {
+            val firstMoovChunk = alignChunkStart(moovLoc.offset)
+            val moovEnd = minOf(totalLength, moovLoc.offset + moovLoc.size)
+            var c = firstMoovChunk
+            while (c < moovEnd) {
+                moovChunks.add(c)
+                c += CHUNK_SIZE_BYTES
+            }
+            cacheEvictor?.markHotWindow(cacheKey, firstMoovChunk, moovEnd)
+        } else if (chunk0Bytes != null && !containsMp4MoovAtom(chunk0Bytes, chunk0Bytes.size)) {
+            // Non-faststart MP4 without explicit mdat length: warm trailing 3 chunks (up to 1.5 MB).
+            val tailStart = alignChunkStart((totalLength - 1L).coerceAtLeast(0L))
+            for (step in 0 until FALLBACK_TAIL_MOOV_CHUNKS) {
+                val c = tailStart - step * CHUNK_SIZE_BYTES
+                if (c > 0L) moovChunks.add(c)
+            }
+            if (moovChunks.isNotEmpty()) {
+                cacheEvictor?.markHotWindow(cacheKey, moovChunks.min(), totalLength)
+            }
+        }
+
+        if (moovChunks.isNotEmpty()) {
+            fetchChunksParallel(cacheKey, rankedMirrors, totalLength, moovChunks)
+        }
+
+        if (resolvedIndex == null || resolvedIndex.seekPoints.isEmpty()) {
+            val epKey = episodeKey?.takeIf { it.isNotBlank() }
+            if (epKey != null && moovLoc != null && moovLoc.size in 16L..Mp4MoovSeekParser.MAX_MOOV_PARSE_BYTES) {
+                val moovData = readCachedRange(cacheKey, moovLoc.offset, moovLoc.size.toInt())
+                if (moovData != null) {
+                    val parsed = Mp4MoovSeekParser.parseMoovIndex(
+                        episodeKey = epKey,
+                        contentLength = totalLength,
+                        moovFileOffset = moovLoc.offset,
+                        buffer = moovData,
+                        bufferLength = moovData.size,
+                        bufferBaseFileOffset = moovLoc.offset
+                    )
+                    if (parsed != null) {
+                        resolvedIndex = parsed
+                        runCatchingCancellable { onVideoIndexReady?.invoke(parsed) }
+                    }
+                }
+            }
+        }
+
+        // Step 3: Compute target start/resume & post-OP chunks using exact moov seek index when available.
+        val effectiveDurationMs = when {
+            resolvedIndex != null && resolvedIndex.durationMs > 0L -> resolvedIndex.durationMs
+            estimatedDurationMs > 0L -> estimatedDurationMs
+            else -> 0L
+        }
         val chunks = buildInitialWindowChunks(
             totalLength = totalLength,
             targetBytes = targetBytes,
             resumePositionMs = resumePositionMs,
-            estimatedDurationMs = estimatedDurationMs,
-            opEndMs = opEndMs
+            estimatedDurationMs = effectiveDurationMs,
+            opEndMs = opEndMs,
+            videoIndex = resolvedIndex
         )
+        pinChunkList(cacheKey, chunks, totalLength)
+        fetchChunksParallel(cacheKey, rankedMirrors, totalLength, chunks)
+        return resolvedIndex
+    }
+
+    private suspend fun ensureChunk0Bytes(
+        cacheKey: String,
+        rankedMirrors: List<String>,
+        chunk0Len: Long,
+        totalLength: Long
+    ): ByteArray? {
+        if (isChunkCached(cacheKey, 0L, chunk0Len)) {
+            return readCachedRange(cacheKey, 0L, chunk0Len.toInt())
+        }
+        val buffer = acquireBuffer()
+        try {
+            for (mirror in rankedMirrors.take(3)) {
+                val read = runCatchingCancellable {
+                    fetchAndCommitChunk(
+                        cacheKey = cacheKey,
+                        mirrorUrl = mirror,
+                        chunkStart = 0L,
+                        chunkLen = chunk0Len,
+                        totalLength = totalLength,
+                        buffer = buffer
+                    )
+                }.getOrDefault(-1)
+                if (read > 0) {
+                    return buffer.copyOf(read)
+                }
+            }
+            return readCachedRange(cacheKey, 0L, chunk0Len.toInt())
+        } finally {
+            releaseBuffer(buffer)
+        }
+    }
+
+    private suspend fun fetchChunksParallel(
+        cacheKey: String,
+        rankedMirrors: List<String>,
+        totalLength: Long,
+        chunks: List<Long>
+    ) {
         val pending = ArrayDeque<Long>()
+        val seen = HashSet<Long>(chunks.size)
         for (start in chunks) {
+            if (!seen.add(start)) continue
             val len = minOf(CHUNK_SIZE_BYTES, totalLength - start)
             if (len > 0L && !isChunkCached(cacheKey, start, len)) {
                 pending.addLast(start)
@@ -131,12 +253,11 @@ class StreamingChunkBooster(
 
         val workers = minOf(MAX_PRELOAD_WORKERS, maxOf(2, rankedMirrors.size))
         val queueMutex = Mutex()
-        val tailStart = alignChunkStart((totalLength - 1L).coerceAtLeast(0L))
-
         coroutineScope {
             (0 until workers).map { workerIdx ->
                 async(Dispatchers.IO) {
                     val buffer = acquireBuffer()
+                    var attemptShift = 0
                     try {
                         while (isActive) {
                             val start = queueMutex.withLock {
@@ -144,32 +265,27 @@ class StreamingChunkBooster(
                             } ?: break
                             val len = minOf(CHUNK_SIZE_BYTES, totalLength - start)
                             if (len <= 0L || isChunkCached(cacheKey, start, len)) continue
-                            val mirror = rankedMirrors[workerIdx % rankedMirrors.size]
-                            val bytesRead = runCatchingCancellable {
-                                fetchAndCommitChunk(
-                                    cacheKey = cacheKey,
-                                    mirrorUrl = mirror,
-                                    chunkStart = start,
-                                    chunkLen = len,
-                                    totalLength = totalLength,
-                                    buffer = buffer
-                                )
-                            }.getOrDefault(-1)
 
-                            // If chunk 0 lacks an MP4 'moov' atom, queue final chunk immediately so
-                            // ExoPlayer can open non-faststart MP4s with zero extra tail RTT.
-                            if (start == 0L && bytesRead > 0 && tailStart > 0L &&
-                                !containsMp4MoovAtom(buffer, bytesRead)
-                            ) {
-                                val tailLen = minOf(CHUNK_SIZE_BYTES, totalLength - tailStart)
-                                if (tailLen > 0L && !isChunkCached(cacheKey, tailStart, tailLen)) {
-                                    queueMutex.withLock {
-                                        if (tailStart !in pending) {
-                                            pending.addFirst(tailStart)
-                                        }
-                                    }
+                            var succeeded = false
+                            val maxTries = minOf(rankedMirrors.size, 2)
+                            for (retry in 0 until maxTries) {
+                                val mirror = rankedMirrors[(workerIdx + attemptShift + retry) % rankedMirrors.size]
+                                val bytesRead = runCatchingCancellable {
+                                    fetchAndCommitChunk(
+                                        cacheKey = cacheKey,
+                                        mirrorUrl = mirror,
+                                        chunkStart = start,
+                                        chunkLen = len,
+                                        totalLength = totalLength,
+                                        buffer = buffer
+                                    )
+                                }.getOrDefault(-1)
+                                if (bytesRead >= 0) {
+                                    succeeded = true
+                                    break
                                 }
                             }
+                            if (!succeeded) attemptShift++
                         }
                     } finally {
                         releaseBuffer(buffer)
@@ -179,9 +295,29 @@ class StreamingChunkBooster(
         }
     }
 
+    private fun pinChunkList(cacheKey: String, chunks: List<Long>, totalLength: Long) {
+        val evictor = cacheEvictor ?: return
+        if (chunks.isEmpty()) return
+        val sorted = chunks.sorted()
+        var rangeStart = sorted[0]
+        var rangeEnd = minOf(totalLength, rangeStart + CHUNK_SIZE_BYTES)
+        for (i in 1 until sorted.size) {
+            val cStart = sorted[i]
+            val cEnd = minOf(totalLength, cStart + CHUNK_SIZE_BYTES)
+            if (cStart <= rangeEnd) {
+                rangeEnd = maxOf(rangeEnd, cEnd)
+            } else {
+                evictor.markHotWindow(cacheKey, rangeStart, rangeEnd)
+                rangeStart = cStart
+                rangeEnd = cEnd
+            }
+        }
+        evictor.markHotWindow(cacheKey, rangeStart, rangeEnd)
+    }
+
     /**
-     * Runs 2-4 parallel workers maintaining a 36 MB (~4-5 min) ahead cache buffer beyond ExoPlayer's
-     * playhead plus the post-OP skip landing zone until cancelled or stopped.
+     * Runs 3-4 parallel workers maintaining a 48 MB (24 MB low-RAM) ahead cache buffer right from
+     * the playhead/buffer frontier plus the exact post-OP skip landing zone until cancelled/stopped.
      */
     fun startStreamingBoost(
         cacheKey: String,
@@ -189,19 +325,26 @@ class StreamingChunkBooster(
         totalLength: Long,
         initialPositionMs: Long,
         initialDurationMs: Long,
-        opEndMs: Long
+        opEndMs: Long,
+        videoIndex: EpisodeVideoIndex? = null
     ) {
         if (mirrors.isEmpty() || totalLength <= 0L) return
         streamingJob?.cancel()
+        val resolvedDur = when {
+            initialDurationMs > 0L -> initialDurationMs
+            videoIndex != null && videoIndex.durationMs > 0L -> videoIndex.durationMs
+            else -> 0L
+        }
         val session = BoostSession(
             cacheKey = cacheKey,
             mirrors = mirrors,
-            totalLength = totalLength
+            totalLength = totalLength,
+            videoIndex = videoIndex
         )
         activeSession = session
         currentPlayheadMs = initialPositionMs.coerceAtLeast(0L)
         currentBufferedMs = currentPlayheadMs
-        currentDurationMs = initialDurationMs.coerceAtLeast(0L)
+        currentDurationMs = resolvedDur
         currentOpEndMs = opEndMs.coerceAtLeast(0L)
         lastSeekEventAtMs = System.currentTimeMillis()
 
@@ -266,9 +409,24 @@ class StreamingChunkBooster(
         currentBufferedMs = bufferedMs.coerceAtLeast(clamped)
         if (durationMs > 0L) currentDurationMs = durationMs
         if (opEndMs > 0L) currentOpEndMs = opEndMs
+
+        // Demote watched chunks > 3 minutes behind playhead so they evict before preloaded anime starts
+        val session = activeSession
+        val resolvedDur = currentDurationMs
+        if (session != null && clamped > TRAILING_DEMOTE_BACK_BUFFER_MS && resolvedDur > 0L) {
+            val behindMs = clamped - TRAILING_DEMOTE_BACK_BUFFER_MS
+            val behindByte = resolveByteOffset(session.videoIndex, behindMs, resolvedDur, session.totalLength)
+            if (behindByte > CHUNK_SIZE_BYTES * 2L &&
+                behindByte - session.lastDemotedTrailingByte >= TRAILING_DEMOTE_STEP_BYTES
+            ) {
+                session.lastDemotedTrailingByte = behindByte
+                cacheEvictor?.demoteTrailingChunks(session.cacheKey, alignChunkStart(behindByte))
+            }
+        }
+
         if (abs(clamped - prev) > SEEK_JUMP_THRESHOLD_MS) {
             lastSeekEventAtMs = System.currentTimeMillis()
-            activeSession?.wakeup?.trySend(Unit)
+            session?.wakeup?.trySend(Unit)
         }
     }
 
@@ -298,18 +456,23 @@ class StreamingChunkBooster(
     private suspend fun claimNextStreamChunk(session: BoostSession): Long? {
         return session.queueMutex.withLock {
             val playheadMs = currentPlayheadMs
-            val durMs = currentDurationMs
+            val durMs = currentDurationMs.takeIf { it > 0L }
+                ?: session.videoIndex?.durationMs?.takeIf { it > 0L }
+                ?: 0L
             val opEnd = currentOpEndMs
 
-            val estByte = estimateByteOffset(maxOf(playheadMs, currentBufferedMs), durMs, session.totalLength)
-            val recentlySeeked = (System.currentTimeMillis() - lastSeekEventAtMs) < RECENT_SEEK_WINDOW_MS
-            val aheadChunks = if (recentlySeeked) 1L else 2L
-            val aheadAnchor = alignChunkStart((estByte + aheadChunks * CHUNK_SIZE_BYTES).coerceAtLeast(0L))
-            val maxAhead = minOf(session.totalLength, aheadAnchor + SLIDING_AHEAD_WINDOW_BYTES)
+            val targetMs = maxOf(playheadMs, currentBufferedMs)
+            val estByte = resolveByteOffset(session.videoIndex, targetMs, durMs, session.totalLength)
+            // Start boosting immediately at the playhead/buffer frontier (0 blind-spot chunks).
+            val aheadAnchor = alignChunkStart(estByte.coerceAtLeast(0L))
+            val maxAhead = minOf(session.totalLength, aheadAnchor + slidingAheadWindowBytes)
+            cacheEvictor?.markHotWindow(session.cacheKey, aheadAnchor, minOf(session.totalLength, aheadAnchor + ACTIVE_PIN_AHEAD_BYTES))
 
             // 1. Prioritize post-OP skip destination (1.5 MB) if playhead is still before OP end
             if (opEnd > playheadMs + 4_000L && durMs > 0L) {
-                val opByte = alignChunkStart(estimateByteOffset(opEnd, durMs, session.totalLength))
+                val opByte = alignChunkStart(
+                    resolveByteOffset(session.videoIndex, opEnd, durMs, session.totalLength)
+                )
                 for (step in 0 until 3) {
                     val cStart = opByte + step * CHUNK_SIZE_BYTES
                     if (isChunkClaimable(session, cStart)) {
@@ -319,7 +482,7 @@ class StreamingChunkBooster(
                 }
             }
 
-            // 2. Sequential sliding window ahead of playhead
+            // 2. Sequential sliding window starting directly at the frontier
             var cursor = aheadAnchor
             while (cursor < maxAhead) {
                 if (isChunkClaimable(session, cursor)) {
@@ -352,6 +515,36 @@ class StreamingChunkBooster(
         }.getOrDefault(false)
     }
 
+    private fun readCachedRange(cacheKey: String, startOffset: Long, length: Int): ByteArray? {
+        if (length <= 0) return null
+        val spans = runCatching { simpleCache.getCachedSpans(cacheKey) }.getOrNull() ?: return null
+        val out = ByteArray(length)
+        val endOffset = startOffset + length.toLong()
+        var covered = 0
+        for (span in spans) {
+            if (!span.isCached) continue
+            val file = span.file ?: continue
+            val spanStart = span.position
+            val spanEnd = span.position + span.length
+            val overlapStart = maxOf(startOffset, spanStart)
+            val overlapEnd = minOf(endOffset, spanEnd)
+            if (overlapEnd <= overlapStart) continue
+            val filePos = overlapStart - spanStart
+            val destPos = (overlapStart - startOffset).toInt()
+            val count = (overlapEnd - overlapStart).toInt()
+            val ok = runCatching {
+                RandomAccessFile(file, "r").use { raf ->
+                    raf.seek(filePos)
+                    raf.readFully(out, destPos, count)
+                }
+                true
+            }.getOrDefault(false)
+            if (!ok) return null
+            covered += count
+        }
+        return if (covered == length) out else null
+    }
+
     private suspend fun fetchAndCommitChunk(
         cacheKey: String,
         mirrorUrl: String,
@@ -372,8 +565,6 @@ class StreamingChunkBooster(
 
         val expectedLen = chunkLen.toInt()
         val startNs = System.nanoTime()
-        // Keep the worker's reusable buffer out of the callback: when a cancelled caller
-        // returns it to the pool, the socket reader may still be unwinding.
         val bytes = try {
             videoHttpClient.readResponse(req) { resp ->
                 if (!isValidChunkResponse(
@@ -410,8 +601,6 @@ class StreamingChunkBooster(
         var position = chunkStart
         while (position < end) {
             currentCoroutineContext().ensureActive()
-            // Download first, then lock only the missing span while committing. If Media3
-            // owns it already, leave that span to the player instead of writing over it.
             val span = simpleCache.startReadWriteNonBlocking(cacheKey, position, end - position)
                 ?: return false
             if (span.isCached) {
@@ -463,14 +652,18 @@ class StreamingChunkBooster(
         }
 
         const val CHUNK_SIZE_BYTES = 512L * 1024L
-        private const val SLIDING_AHEAD_WINDOW_BYTES = 36L * 1024L * 1024L
+        private const val SLIDING_AHEAD_WINDOW_BYTES = 48L * 1024L * 1024L
+        private const val LOW_RAM_SLIDING_AHEAD_WINDOW_BYTES = 24L * 1024L * 1024L
+        private const val ACTIVE_PIN_AHEAD_BYTES = 16L * 1024L * 1024L
+        private const val TRAILING_DEMOTE_BACK_BUFFER_MS = 180_000L
+        private const val TRAILING_DEMOTE_STEP_BYTES = 4L * 1024L * 1024L
+        private const val FALLBACK_TAIL_MOOV_CHUNKS = 3
         private const val MAX_PRELOAD_WORKERS = 4
         private const val MULTI_MIRROR_WORKERS = 4
-        private const val SINGLE_HOST_WORKERS = 2
+        private const val SINGLE_HOST_WORKERS = 3
         private const val MAX_CHUNK_RETRIES = 3
-        private const val MAX_POOL_BUFFERS = 4
+        private const val MAX_POOL_BUFFERS = 6
         private const val SEEK_JUMP_THRESHOLD_MS = 4_000L
-        private const val RECENT_SEEK_WINDOW_MS = 8_000L
 
         fun alignChunkStart(byteOffset: Long): Long =
             (byteOffset.coerceAtLeast(0L) / CHUNK_SIZE_BYTES) * CHUNK_SIZE_BYTES
@@ -485,32 +678,29 @@ class StreamingChunkBooster(
             return (ratio * totalLength.toDouble()).toLong()
         }
 
-        /**
-         * Scans an MP4 head buffer for the 4-byte ASCII `moov` box identifier. If missing in chunk 0,
-         * the MP4 is non-faststart and stores its movie index at the tail of the file.
-         */
-        fun containsMp4MoovAtom(bytes: ByteArray, length: Int = bytes.size): Boolean {
-            val limit = minOf(length, bytes.size) - 3
-            var i = 0
-            while (i < limit) {
-                if (bytes[i] == 0x6D.toByte() &&      // 'm'
-                    bytes[i + 1] == 0x6F.toByte() &&  // 'o'
-                    bytes[i + 2] == 0x6F.toByte() &&  // 'o'
-                    bytes[i + 3] == 0x76.toByte()     // 'v'
-                ) {
-                    return true
-                }
-                i++
+        fun resolveByteOffset(
+            videoIndex: EpisodeVideoIndex?,
+            positionMs: Long,
+            durationMs: Long,
+            totalLength: Long
+        ): Long {
+            if (positionMs <= 0L || totalLength <= 0L) return 0L
+            videoIndex?.resolveByteOffset(positionMs)?.let { exact ->
+                return exact.coerceIn(0L, (totalLength - 1L).coerceAtLeast(0L))
             }
-            return false
+            return estimateByteOffset(positionMs, durationMs, totalLength)
         }
+
+        fun containsMp4MoovAtom(bytes: ByteArray, length: Int = bytes.size): Boolean =
+            Mp4MoovSeekParser.containsMp4MoovAtom(bytes, length)
 
         fun buildInitialWindowChunks(
             totalLength: Long,
             targetBytes: Long,
             resumePositionMs: Long,
             estimatedDurationMs: Long,
-            opEndMs: Long
+            opEndMs: Long,
+            videoIndex: EpisodeVideoIndex? = null
         ): List<Long> {
             if (totalLength <= 0L || targetBytes <= 0L) return emptyList()
             val ordered = LinkedHashSet<Long>()
@@ -520,20 +710,45 @@ class StreamingChunkBooster(
                 .toInt()
                 .coerceAtLeast(1)
 
-            val startByte = if (resumePositionMs > 10_000L && estimatedDurationMs > 0L) {
-                val est = estimateByteOffset(resumePositionMs, estimatedDurationMs, totalLength)
-                alignChunkStart((est - CHUNK_SIZE_BYTES).coerceAtLeast(0L))
-            } else {
-                0L
+            val effectiveDurMs = when {
+                videoIndex != null && videoIndex.durationMs > 0L -> videoIndex.durationMs
+                else -> estimatedDurationMs
             }
 
-            for (i in 0 until chunkCount) {
+            val exactResumeByte = if (resumePositionMs > 10_000L) {
+                videoIndex?.resolveByteOffset(resumePositionMs)
+            } else {
+                null
+            }
+
+            val startByte: Long
+            val totalWindowChunks: Int
+            if (exactResumeByte != null) {
+                val aligned = alignChunkStart(exactResumeByte)
+                startByte = if (exactResumeByte - aligned < 64L * 1024L && aligned >= CHUNK_SIZE_BYTES) {
+                    aligned - CHUNK_SIZE_BYTES
+                } else {
+                    aligned
+                }
+                totalWindowChunks = chunkCount
+            } else if (resumePositionMs > 10_000L && effectiveDurMs > 0L) {
+                // Widen CBR fallback lead by 2 chunks (1 MB) to absorb anime VBR variance.
+                val est = estimateByteOffset(resumePositionMs, effectiveDurMs, totalLength)
+                startByte = alignChunkStart((est - 2L * CHUNK_SIZE_BYTES).coerceAtLeast(0L))
+                totalWindowChunks = chunkCount + 2
+            } else {
+                startByte = 0L
+                totalWindowChunks = chunkCount
+            }
+
+            for (i in 0 until totalWindowChunks) {
                 val c = startByte + i * CHUNK_SIZE_BYTES
                 if (c < totalLength) ordered.add(c)
             }
 
-            if (opEndMs > 5_000L && estimatedDurationMs > 0L) {
-                val opStart = alignChunkStart(estimateByteOffset(opEndMs, estimatedDurationMs, totalLength))
+            if (opEndMs > 5_000L && effectiveDurMs > 0L) {
+                val opByte = resolveByteOffset(videoIndex, opEndMs, effectiveDurMs, totalLength)
+                val opStart = alignChunkStart(opByte)
                 for (step in 0 until 3) {
                     val c = opStart + step * CHUNK_SIZE_BYTES
                     if (c < totalLength) ordered.add(c)

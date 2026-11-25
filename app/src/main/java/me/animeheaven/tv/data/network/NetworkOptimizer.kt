@@ -8,6 +8,9 @@ import java.io.IOException
 import java.net.InetAddress
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import me.animeheaven.tv.data.cache.LruCacheMap
 import me.animeheaven.tv.data.local.AppSettingsStore
 import me.animeheaven.tv.data.model.PreloadMode
@@ -63,10 +66,9 @@ class CachedDns(
 }
 
 /**
- * Evaluates current connectivity (unmetered LAN/Wi-Fi vs metered mobile hotspot) together
- * with the user's PreloadMode preference to scale background prefetch depth safely.
- * Tracks metered state reactively via [ConnectivityManager.NetworkCallback] to avoid repeated
- * Binder IPC on every preload decision.
+ * Evaluates current connectivity (unmetered LAN/Wi-Fi vs metered cellular/hotspot) together
+ * with the user's PreloadMode preference. Strictly disables all background video preloading
+ * whenever the active network is metered.
  */
 class NetworkPolicy(
     context: Context,
@@ -80,6 +82,9 @@ class NetworkPolicy(
     private var cachedMetered: Boolean =
         runCatching { connectivityManager?.isActiveNetworkMetered ?: false }.getOrDefault(false)
 
+    private val _isUnmeteredFlow = MutableStateFlow(!cachedMetered)
+    val isUnmeteredFlow: StateFlow<Boolean> = _isUnmeteredFlow.asStateFlow()
+
     init {
         registerCallbackSafely()
     }
@@ -92,18 +97,22 @@ class NetworkPolicy(
                     network: Network,
                     networkCapabilities: NetworkCapabilities
                 ) {
-                    cachedMetered = !networkCapabilities.hasCapability(
+                    val metered = !networkCapabilities.hasCapability(
                         NetworkCapabilities.NET_CAPABILITY_NOT_METERED
                     )
+                    cachedMetered = metered
+                    _isUnmeteredFlow.value = !metered
                 }
 
                 override fun onAvailable(network: Network) {
-                    cachedMetered = true // Wait for onCapabilitiesChanged rather than querying the old network.
+                    cachedMetered = true
+                    _isUnmeteredFlow.value = false
                     dns?.clear()
                 }
 
                 override fun onLost(network: Network) {
                     cachedMetered = true
+                    _isUnmeteredFlow.value = false
                 }
             })
         }
@@ -119,44 +128,115 @@ class NetworkPolicy(
     fun shouldPreloadHomeDetails(): Boolean = effectivePreloadMode() != PreloadMode.DATA_SAVER
 
     fun maxContinueWatchingPreloadCount(): Int = when (effectivePreloadMode()) {
-        PreloadMode.AGGRESSIVE -> 3
+        PreloadMode.AGGRESSIVE -> 15
+        PreloadMode.BALANCED -> 5
+        PreloadMode.DATA_SAVER -> 0
+    }
+
+    fun continueVideoBytes(index: Int): Long = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> when {
+            index == 0 -> 8L * 1024L * 1024L
+            index in 1..2 -> 6L * 1024L * 1024L
+            index in 3..14 -> 5L * 1024L * 1024L
+            else -> 0L
+        }
+        PreloadMode.BALANCED -> when {
+            index == 0 -> 4L * 1024L * 1024L
+            index in 1..2 -> 3L * 1024L * 1024L
+            else -> 0L
+        }
+        PreloadMode.DATA_SAVER -> 0L
+    }
+
+    fun continuePrimaryVideoBytes(): Long = continueVideoBytes(0)
+
+    fun bannerVideoCount(): Int = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> 5
         PreloadMode.BALANCED -> 1
         PreloadMode.DATA_SAVER -> 0
     }
 
+    fun bannerVideoBytes(index: Int): Long = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> if (index == 0) 6L * 1024L * 1024L else 5L * 1024L * 1024L
+        PreloadMode.BALANCED -> if (index == 0) 3L * 1024L * 1024L else 0L
+        PreloadMode.DATA_SAVER -> 0L
+    }
+
+    fun bookmarkDetailCount(): Int = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> 15
+        PreloadMode.BALANCED -> 3
+        PreloadMode.DATA_SAVER -> 0
+    }
+
+    fun bookmarkVideoCount(): Int = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> 15
+        PreloadMode.BALANCED -> 0
+        PreloadMode.DATA_SAVER -> 0
+    }
+
+    fun bookmarkVideoBytes(): Long = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> 4608L * 1024L
+        PreloadMode.BALANCED -> 0L
+        PreloadMode.DATA_SAVER -> 0L
+    }
+
     fun homePopularDetailCount(): Int = when (effectivePreloadMode()) {
-        PreloadMode.AGGRESSIVE -> 6
+        PreloadMode.AGGRESSIVE -> 12
         PreloadMode.BALANCED -> 4
         PreloadMode.DATA_SAVER -> 0
     }
 
     fun homeScheduleDetailCount(): Int = when (effectivePreloadMode()) {
-        PreloadMode.AGGRESSIVE -> 6
+        PreloadMode.AGGRESSIVE -> 24
         PreloadMode.BALANCED -> 4
         PreloadMode.DATA_SAVER -> 0
     }
 
+    fun homeShowVideoBytes(): Long = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> 4L * 1024L * 1024L
+        PreloadMode.BALANCED -> 0L
+        PreloadMode.DATA_SAVER -> 0L
+    }
+
     fun catalogDetailCount(): Int = when (effectivePreloadMode()) {
-        PreloadMode.AGGRESSIVE -> 6
-        PreloadMode.BALANCED -> 2
+        PreloadMode.AGGRESSIVE -> 10
+        PreloadMode.BALANCED -> 3
         PreloadMode.DATA_SAVER -> 0
     }
 
-    fun continuePrimaryVideoBytes(): Long = when (effectivePreloadMode()) {
-        PreloadMode.AGGRESSIVE -> 3L * 1024L * 1024L
-        PreloadMode.BALANCED -> 2L * 1024L * 1024L
+    fun catalogVideoCount(): Int = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> 8
+        PreloadMode.BALANCED -> 0
+        PreloadMode.DATA_SAVER -> 0
+    }
+
+    fun detailPrimaryVideoBytes(): Long = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> 8L * 1024L * 1024L
+        PreloadMode.BALANCED -> 4L * 1024L * 1024L
+        PreloadMode.DATA_SAVER -> 0L
+    }
+
+    fun detailFollowupVideoBytes(): Long = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> 4L * 1024L * 1024L
+        PreloadMode.BALANCED -> 0L
+        PreloadMode.DATA_SAVER -> 0L
+    }
+
+    fun focusHoverVideoBytes(): Long = when (effectivePreloadMode()) {
+        PreloadMode.AGGRESSIVE -> 5L * 1024L * 1024L
+        PreloadMode.BALANCED -> 0L
         PreloadMode.DATA_SAVER -> 0L
     }
 
     fun nextEpisodeInitialBytes(): Long = when (effectivePreloadMode()) {
-        PreloadMode.AGGRESSIVE -> 2L * 1024L * 1024L
-        PreloadMode.BALANCED -> 2L * 1024L * 1024L
+        PreloadMode.AGGRESSIVE -> 6L * 1024L * 1024L
+        PreloadMode.BALANCED -> 4L * 1024L * 1024L
         PreloadMode.DATA_SAVER -> 0L
     }
 
     fun nextEpisodeEscalatedBytes(): Long = when (effectivePreloadMode()) {
-        PreloadMode.AGGRESSIVE -> 8L * 1024L * 1024L
-        PreloadMode.BALANCED -> 3L * 1024L * 1024L
+        PreloadMode.AGGRESSIVE -> 20L * 1024L * 1024L
+        PreloadMode.BALANCED -> 10L * 1024L * 1024L
         PreloadMode.DATA_SAVER -> 0L
     }
 }
@@ -194,7 +274,7 @@ object NetworkPreconnector {
             .map { it.trim().lowercase() }
             .filter { it.matches(Regex("""[a-z0-9.-]+""")) }
             .distinct()
-            .take(2)
+            .take(3)
             .map { "https://$it/" }
             .toList()
         preconnectUrls(okHttpClient, urls)
@@ -211,9 +291,7 @@ object NetworkPreconnector {
                 .header("User-Agent", AnimeHeavenClient.USER_AGENT)
                 .build()
             okHttpClient.newCall(req).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    // Best-effort warm-up only
-                }
+                override fun onFailure(call: Call, e: IOException) = Unit
 
                 override fun onResponse(call: Call, response: Response) {
                     response.close()

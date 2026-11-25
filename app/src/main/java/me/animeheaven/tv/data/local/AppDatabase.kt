@@ -106,6 +106,9 @@ interface WatchProgressDao {
     @Query("SELECT * FROM watch_progress WHERE episodeKey = :episodeKey LIMIT 1")
     suspend fun getByEpisodeKey(episodeKey: String): WatchProgressEntity?
 
+    @Query("SELECT * FROM watch_progress ORDER BY updatedAt DESC LIMIT :limit")
+    suspend fun getRecentOnce(limit: Int = 128): List<WatchProgressEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: WatchProgressEntity)
 
@@ -155,6 +158,18 @@ interface WebCacheDao {
             "ORDER BY fetchedAt DESC LIMIT :limit"
     )
     suspend fun getRecentDetails(limit: Int = 12): List<WebCacheEntity>
+
+    @Query(
+        "SELECT * FROM web_cache WHERE cacheKey LIKE 'gate:%' AND parsedJson IS NOT NULL " +
+            "ORDER BY fetchedAt DESC LIMIT :limit"
+    )
+    suspend fun getRecentStreams(limit: Int = 48): List<WebCacheEntity>
+
+    @Query(
+        "SELECT * FROM web_cache WHERE cacheKey LIKE 'vmeta:%' AND parsedJson IS NOT NULL " +
+            "ORDER BY fetchedAt DESC LIMIT :limit"
+    )
+    suspend fun getRecentVideoMeta(limit: Int = 128): List<WebCacheEntity>
 
     @Query("SELECT * FROM web_cache WHERE cacheKey LIKE 'artwork:ah:%' AND fetchedAt >= :since ORDER BY fetchedAt DESC LIMIT :limit")
     suspend fun getRecentArtwork(since: Long, limit: Int = 128): List<WebCacheEntity>

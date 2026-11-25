@@ -25,11 +25,11 @@ enum class PreloadMode(
 ) {
     AGGRESSIVE(
         "Aggressive (Recommended)",
-        "Preload Home shows, tabs, Bookmarks & up to 8 MB Next Ep video on Wi-Fi/LAN"
+        "Preload Continue Watching, Home, Bookmarks & instant Watch Next (20 MB) on Wi-Fi/LAN"
     ),
     BALANCED(
         "Balanced",
-        "Preload Home banners, Continue Watching & metadata on D-pad focus"
+        "Preload Continue Watching, Hero Banner, Detail & 10 MB Watch Next on Wi-Fi/LAN"
     ),
     DATA_SAVER(
         "Data Saver",

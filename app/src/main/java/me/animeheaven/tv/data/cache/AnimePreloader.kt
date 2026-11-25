@@ -5,9 +5,10 @@ import coil3.ImageLoader
 import coil3.request.ImageRequest
 import coil3.request.allowRgb565
 import coil3.size.Precision
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -15,8 +16,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
@@ -24,9 +25,11 @@ import me.animeheaven.tv.data.local.BookmarkEntity
 import me.animeheaven.tv.data.model.AnimeCard
 import me.animeheaven.tv.data.model.AnimeDetail
 import me.animeheaven.tv.data.model.ContinueWatchingItem
+import me.animeheaven.tv.data.model.EpisodeStream
 import me.animeheaven.tv.data.model.FastSearchItem
 import me.animeheaven.tv.data.model.HomeFeed
 import me.animeheaven.tv.data.model.PreloadMode
+import me.animeheaven.tv.data.network.EpisodeSkipTimes
 import me.animeheaven.tv.data.network.NetworkPolicy
 import me.animeheaven.tv.data.network.NetworkPreconnector
 import me.animeheaven.tv.data.network.SkipTimesClient
@@ -36,11 +39,25 @@ import me.animeheaven.tv.data.runCatchingCancellable
 import okhttp3.OkHttpClient
 
 /**
- * 3-Band predictive preloader with reactive user-priority yield gate, canonical Coil image
- * target sizes, Band-1 congestion pacing, and shared-key video warming:
- * - Band 0: Immediate visible Home artwork (exact UI pixel sizes), Hero banners, Continue Watching #1-3
- * - Band 1: Paced background warming after visible image grace delay (Popular, Schedule, Catalog tabs, Bookmarks)
- * - Band 2: Screen lookahead (D-pad neighbors, live Search top matches, Detail Next-Ep, Player 8 MB escalation)
+ * Snapshot emitted when a Watch Next episode has its stream, ranked mirrors, `moov` header,
+ * and playable opening bytes committed to `SimpleCache` so the player can append it seamlessly.
+ */
+data class PreparedEpisodeWarmup(
+    val episodeKey: String,
+    val stream: EpisodeStream,
+    val rankedMirrors: List<String>,
+    val cacheKey: String,
+    val skipTimes: EpisodeSkipTimes,
+    val durationMs: Long
+)
+
+/**
+ * 4-Wave predictive preloader with origin rate-limit protection, reactive user-priority yielding,
+ * resume-aware episode resolution, and tiered hot-window video warming (strictly unmetered Wi-Fi/LAN):
+ * - Wave 0 (0 ms): Visible Home images, CW #1 (8 MB + Warm MediaSource), CW #2-#3 (6 MB), Hero #1 (6 MB)
+ * - Wave 1 (350 ms): Remaining CW #4-#15 (5 MB), remaining Banners (5 MB), Bookmarks #1-#15 (4.5 MB)
+ * - Wave 2 (paced): Popular strip (12 shows, 4 MB), Home Schedule (24 shows, 4 MB), Catalog tabs
+ * - Wave 3 (interactive): Card focus, Detail screen (8 MB + Warm MediaSource), Episode hover (5 MB), Watch Next (6 -> 20 MB)
  */
 class AnimePreloader(
     context: Context,
@@ -55,12 +72,22 @@ class AnimePreloader(
     private val supervisor = SupervisorJob()
     private val workerScope = CoroutineScope(supervisor + Dispatchers.IO)
     private val scope = SpeculativeJobs()
-    private val band0Gate = Semaphore(3)
-    private val band1Gate = Semaphore(2)
+
+    // Strict origin concurrency cap protects animeheaven.me from 429/503 throttling.
+    private val originHtmlGate = Semaphore(2)
+    private val videoWarmupGate = Semaphore(2)
     private val imageGate = Semaphore(4)
     private var suspended = false
 
+    @Volatile
+    private var originBackoffUntilMs: Long = 0L
+
+    @Volatile
+    private var originBackoffDurationMs: Long = 0L
+
     private fun preloadAllowed(): Boolean = networkPolicy?.effectivePreloadMode() != PreloadMode.DATA_SAVER
+
+    private fun videoPreloadAllowed(): Boolean = networkPolicy?.shouldPreloadVideo() != false
 
     private inner class SpeculativeJobs {
         fun launch(block: suspend CoroutineScope.() -> Unit): Job = synchronized(this@AnimePreloader) {
@@ -74,16 +101,24 @@ class AnimePreloader(
     private val warmedAnimeDetails = ConcurrentHashMap.newKeySet<String>()
     private val warmedCatalogTabs = ConcurrentHashMap.newKeySet<String>()
     private val warmedEpisodeStreams = ConcurrentHashMap.newKeySet<String>()
+    private val warmedVideoBytesByEpisode = ConcurrentHashMap<String, Long>()
     private val warmedSearchQueries = ConcurrentHashMap.newKeySet<String>()
 
     private val foregroundUserWorkCount = MutableStateFlow(0)
 
     private var focusPreloadJob: Job? = null
+    private var episodeFocusPreloadJob: Job? = null
     private var homeEcosystemJob: Job? = null
     private var detailPreloadJob: Job? = null
 
     @Volatile
     private var lastHomeEcosystemSignature: String? = null
+
+    @Volatile
+    private var lastHomeFeed: HomeFeed? = null
+
+    @Volatile
+    private var lastContinueItems: List<ContinueWatchingItem> = emptyList()
 
     @Volatile
     private var lastWarmedTopContinueKey: String? = null
@@ -103,6 +138,39 @@ class AnimePreloader(
             foregroundUserWorkCount.first { it <= 0 }
         }
         if (!preloadAllowed()) throw CancellationException("Speculative preload disabled")
+    }
+
+    private suspend fun awaitOriginBackoffIfNeeded() {
+        val waitMs = originBackoffUntilMs - System.currentTimeMillis()
+        if (waitMs > 0L) {
+            delay(waitMs.coerceAtMost(MAX_ORIGIN_BACKOFF_MS))
+        }
+    }
+
+    private fun recordOriginOutcome(error: Throwable?) {
+        val msg = error?.message.orEmpty()
+        val throttled = error is IOException && ("HTTP 429" in msg || "HTTP 503" in msg)
+        if (throttled) {
+            val next = when {
+                originBackoffDurationMs <= 0L -> 2_000L
+                originBackoffDurationMs < 5_000L -> 5_000L
+                else -> MAX_ORIGIN_BACKOFF_MS
+            }
+            originBackoffDurationMs = next
+            originBackoffUntilMs = System.currentTimeMillis() + next
+        } else if (error == null) {
+            originBackoffDurationMs = 0L
+        }
+    }
+
+    /**
+     * Called when connectivity transitions from cellular/offline onto unmetered Wi-Fi/LAN
+     * so startup preloading runs automatically without requiring an app restart.
+     */
+    fun onUnmeteredNetworkAvailable() {
+        val feed = lastHomeFeed ?: return
+        lastHomeEcosystemSignature = null
+        preloadHomeEcosystem(feed, lastContinueItems)
     }
 
     fun preloadImages(
@@ -149,16 +217,20 @@ class AnimePreloader(
         feed: HomeFeed,
         continueItems: List<ContinueWatchingItem>
     ) {
+        lastHomeFeed = feed
+        lastContinueItems = continueItems
         if (suspended || !preloadAllowed()) return
-        // Deduplicate by feed & target episode keys so 5s/15s playback progress updates never re-trigger storms
-        val signature = buildString(128) {
+
+        val signature = buildString(160) {
             append(feed.banners.firstOrNull()?.animeId.orEmpty())
             append('|')
             append(feed.scheduleItems.size)
             append('|')
             append(feed.popularItems.size)
             append('|')
-            continueItems.take(3).forEach {
+            append(networkPolicy?.effectivePreloadMode()?.name.orEmpty())
+            append('|')
+            continueItems.take(5).forEach {
                 append(it.targetEpisodeKey)
                 append(',')
             }
@@ -166,32 +238,33 @@ class AnimePreloader(
         if (signature == lastHomeEcosystemSignature) return
         lastHomeEcosystemSignature = signature
 
-        // Band 0: Immediate visible + near-viewport images at EXACT UI target sizes (0ms RAM hits)
-        preloadImages(feed.banners.map { it.bannerImageUrl }, maxCount = 3, targetSize = ImageTargetSize.HERO_BANNER)
-        preloadImages(continueItems.map { it.coverUrl }, maxCount = 4, targetSize = ImageTargetSize.CONTINUE_CARD)
-        preloadImages(feed.popularItems.map { it.coverUrl }, maxCount = 6, targetSize = ImageTargetSize.POPULAR_CARD)
-        preloadImages(feed.scheduleItems.map { it.coverUrl }, maxCount = 8, targetSize = ImageTargetSize.STANDARD_CARD)
+        // Wave 0: Immediate visible + near-viewport images at exact UI pixel sizes
+        preloadImages(feed.banners.map { it.bannerImageUrl }, maxCount = 5, targetSize = ImageTargetSize.HERO_BANNER)
+        preloadImages(continueItems.map { it.coverUrl }, maxCount = 8, targetSize = ImageTargetSize.CONTINUE_CARD)
+        preloadImages(feed.popularItems.map { it.coverUrl }, maxCount = 12, targetSize = ImageTargetSize.POPULAR_CARD)
+        preloadImages(feed.scheduleItems.map { it.coverUrl }, maxCount = 16, targetSize = ImageTargetSize.STANDARD_CARD)
 
-        // Preconnect learned video CDNs & skip APIs only when Continue Watching shows playback is likely
-        if (continueItems.isNotEmpty()) {
-            scope.launch {
-                val vcm = videoCacheManagerProvider()
-                val topHosts = vcm.mirrorHealthTracker.topHealthyHosts(limit = 2)
-                if (topHosts.isNotEmpty()) {
-                    NetworkPreconnector.preconnectCdnHostsAsync(vcm.videoHttpClient, topHosts)
-                }
-                okHttpClient?.let { NetworkPreconnector.preconnectSkipApisAsync(it) }
+        // Preconnect animeheaven.me, learned top 3 video CDNs, and Skip APIs immediately
+        scope.launch {
+            okHttpClient?.let {
+                NetworkPreconnector.preconnectAsync(it)
+                NetworkPreconnector.preconnectSkipApisAsync(it)
+            }
+            val vcm = videoCacheManagerProvider()
+            val topHosts = vcm.mirrorHealthTracker.topHealthyHosts(limit = 3)
+            if (topHosts.isNotEmpty()) {
+                NetworkPreconnector.preconnectCdnHostsAsync(vcm.videoHttpClient, topHosts)
             }
         }
 
+        // Wave 0 Critical Path: Launch CW #1 immediately at 0 ms with warm MediaSource pre-prep
         val topContinue = continueItems.firstOrNull()
         var launchedTopContinueNow = false
         if (topContinue != null && topContinue.targetEpisodeKey != lastWarmedTopContinueKey) {
             launchedTopContinueNow = true
             lastWarmedTopContinueKey = topContinue.targetEpisodeKey
             scope.launch {
-                val cwBytes = networkPolicy?.continuePrimaryVideoBytes()
-                    ?: VideoCacheManager.DEFAULT_PRELOAD_BYTES
+                val cwBytes = networkPolicy?.continueVideoBytes(0) ?: (8L * 1024L * 1024L)
                 preloadEpisodeBundle(
                     episodeKey = topContinue.targetEpisodeKey,
                     animeId = topContinue.animeId,
@@ -199,24 +272,25 @@ class AnimePreloader(
                     episodeLabel = topContinue.targetEpisodeLabel,
                     videoBytes = cwBytes,
                     resumePositionMs = topContinue.resumePositionMs,
-                    estimatedDurationMs = topContinue.durationMs
+                    estimatedDurationMs = topContinue.durationMs,
+                    highPriority = true,
+                    warmMediaSource = true
                 )
             }
         }
 
-        if (homeEcosystemJob?.isActive == true) return
+        homeEcosystemJob?.cancel()
         homeEcosystemJob = scope.launch {
-            // Band 0: Continue Watching details + secondary items (skip duplicate #0 video bundle!)
-            val cwCount = networkPolicy?.maxContinueWatchingPreloadCount() ?: 3
-            continueItems.take(cwCount).forEachIndexed { idx, cw ->
+            val warmedAnimeVideoIds = HashSet<String>(64)
+
+            // Wave 0: Top 3 Continue Watching items + Hero Banner #1
+            val cwMax = networkPolicy?.maxContinueWatchingPreloadCount() ?: 15
+            continueItems.take(minOf(3, cwMax)).forEachIndexed { idx, cw ->
+                warmedAnimeVideoIds.add(cw.animeId)
                 launch {
                     warmAnimeDetail(cw.animeId, highPriority = true)
                     if (idx == 0 && launchedTopContinueNow) return@launch
-                    val bytes = when (idx) {
-                        0 -> networkPolicy?.continuePrimaryVideoBytes() ?: VideoCacheManager.DEFAULT_PRELOAD_BYTES
-                        1 -> if (networkPolicy?.shouldPreloadVideo() == true) 1536L * 1024L else 0L
-                        else -> 0L
-                    }
+                    val bytes = networkPolicy?.continueVideoBytes(idx) ?: VideoCacheManager.DEFAULT_PRELOAD_BYTES
                     preloadEpisodeBundle(
                         episodeKey = cw.targetEpisodeKey,
                         animeId = cw.animeId,
@@ -224,124 +298,175 @@ class AnimePreloader(
                         episodeLabel = cw.targetEpisodeLabel,
                         videoBytes = bytes,
                         resumePositionMs = cw.resumePositionMs,
-                        estimatedDurationMs = cw.durationMs
+                        estimatedDurationMs = cw.durationMs,
+                        highPriority = true,
+                        warmMediaSource = idx == 0
                     )
                 }
             }
 
-            // Grace delay so Band-0 visible Home thumbnails never fight Band-1 HTML scraping on animeheaven.me
-            delay(BAND1_STARTUP_GRACE_MS)
-
-            feed.banners.take(2).forEachIndexed { idx, banner ->
-                launch {
-                    if (idx > 0) yieldIfUserActive()
-                    val detail = warmAnimeDetail(banner.animeId, highPriority = idx == 0)
-                    if (idx == 0 && detail != null) {
-                        val firstEp = detail.episodes.lastOrNull()
-                        if (firstEp != null) {
-                            preloadEpisodeBundle(
-                                episodeKey = firstEp.key,
-                                animeId = detail.id,
-                                animeTitle = detail.title,
-                                episodeLabel = firstEp.numberLabel,
-                                videoBytes = 0L
-                            )
-                        }
+            // Hero Banner #1 (focused by default on TV Home launch)
+            feed.banners.firstOrNull()?.let { hero ->
+                if (warmedAnimeVideoIds.add(hero.animeId)) {
+                    launch {
+                        val heroBytes = networkPolicy?.bannerVideoBytes(0) ?: (6L * 1024L * 1024L)
+                        warmAnimeWithPrimaryVideo(
+                            animeId = hero.animeId,
+                            videoBytes = heroBytes,
+                            highPriority = true,
+                            warmMediaSource = continueItems.isEmpty()
+                        )
                     }
                 }
             }
 
-            // Band 1: Catalog tabs (New, Popular, Seasonal) + top details inside tabs
-            val catalogDetailCap = networkPolicy?.catalogDetailCount() ?: 6
-            launch {
+            // Short startup grace delay so Frame 1 and CW #1 settle before Wave 1 begins
+            delay(WAVE1_STARTUP_GRACE_MS)
+
+            // Wave 1: Remaining Continue Watching (#4-#15)
+            continueItems.drop(3).take((cwMax - 3).coerceAtLeast(0)).forEachIndexed { offsetIdx, cw ->
                 yieldIfUserActive()
-                if (warmedCatalogTabs.add("new")) {
-                    val items = if (repository.hasFreshChartInMemory("chart:new")) {
-                        runCatchingCancellable { repository.getNewEpisodes().second }.getOrDefault(emptyList())
-                    } else {
-                        band1Gate.withPermit {
-                            runCatchingCancellable { repository.getNewEpisodes().second }.getOrDefault(emptyList())
-                        }
-                    }
-                    preloadImages(items.map { it.coverUrl }, maxCount = 12, targetSize = ImageTargetSize.STANDARD_CARD)
-                    items.take(catalogDetailCap).forEach { card ->
-                        yieldIfUserActive()
-                        warmAnimeDetail(card.id, highPriority = false)
-                    }
-                }
+                warmedAnimeVideoIds.add(cw.animeId)
+                val cwIndex = offsetIdx + 3
+                val bytes = networkPolicy?.continueVideoBytes(cwIndex) ?: (5L * 1024L * 1024L)
+                preloadEpisodeBundle(
+                    episodeKey = cw.targetEpisodeKey,
+                    animeId = cw.animeId,
+                    animeTitle = cw.animeTitle,
+                    episodeLabel = cw.targetEpisodeLabel,
+                    videoBytes = bytes,
+                    resumePositionMs = cw.resumePositionMs,
+                    estimatedDurationMs = cw.durationMs,
+                    highPriority = false
+                )
             }
-            launch {
+
+            // Wave 1: Remaining Hero Banners (#2-#5)
+            val bannerCap = networkPolicy?.bannerVideoCount() ?: 5
+            feed.banners.drop(1).take((bannerCap - 1).coerceAtLeast(0)).forEachIndexed { offsetIdx, banner ->
                 yieldIfUserActive()
-                if (warmedCatalogTabs.add("popular")) {
-                    val items = if (repository.hasFreshChartInMemory("chart:popular")) {
-                        runCatchingCancellable { repository.getPopularToday().second }.getOrDefault(emptyList())
-                    } else {
-                        band1Gate.withPermit {
-                            runCatchingCancellable { repository.getPopularToday().second }.getOrDefault(emptyList())
-                        }
-                    }
-                    preloadImages(items.map { it.coverUrl }, maxCount = 12, targetSize = ImageTargetSize.STANDARD_CARD)
-                    items.take(catalogDetailCap).forEach { card ->
-                        yieldIfUserActive()
-                        warmAnimeDetail(card.id, highPriority = false)
-                    }
-                }
-            }
-            feed.seasonPath?.takeIf { it.isNotBlank() }?.let { path ->
-                launch {
-                    yieldIfUserActive()
-                    if (warmedCatalogTabs.add(path)) {
-                        val items = if (repository.hasFreshChartInMemory("chart:$path", AnimeHeavenRepository.TTL_SEASONAL_MS)) {
-                            runCatchingCancellable { repository.getSeasonal(path).second }.getOrDefault(emptyList())
-                        } else {
-                            band1Gate.withPermit {
-                                runCatchingCancellable { repository.getSeasonal(path).second }.getOrDefault(emptyList())
-                            }
-                        }
-                        preloadImages(items.map { it.coverUrl }, maxCount = 10, targetSize = ImageTargetSize.STANDARD_CARD)
-                    }
+                if (warmedAnimeVideoIds.add(banner.animeId)) {
+                    val bytes = networkPolicy?.bannerVideoBytes(offsetIdx + 1) ?: (5L * 1024L * 1024L)
+                    warmAnimeWithPrimaryVideo(
+                        animeId = banner.animeId,
+                        videoBytes = bytes,
+                        highPriority = false
+                    )
                 }
             }
 
-            // Band 1: Visible Popular strip + Top Schedule + Bookmark details
+            // Wave 1: Top Bookmarks (up to 15) with opening/resume video seconds
             if (networkPolicy?.shouldPreloadHomeDetails() != false) {
-                val popularCap = networkPolicy?.homePopularDetailCount() ?: 10
-                val scheduleCap = networkPolicy?.homeScheduleDetailCount() ?: 12
-
-                launch {
-                    feed.popularItems.take(popularCap).forEach { card ->
-                        yieldIfUserActive()
-                        warmAnimeDetail(card.id, highPriority = false)
-                    }
-                }
-                launch {
-                    feed.scheduleItems.take(scheduleCap).forEach { card ->
-                        yieldIfUserActive()
-                        warmAnimeDetail(card.id, highPriority = false)
-                    }
-                }
-                launch {
+                val bookmarkIds = runCatchingCancellable { repository.getBookmarkIdsSnapshot() }
+                    .getOrDefault(emptyList())
+                val bmDetailCap = networkPolicy?.bookmarkDetailCount() ?: 15
+                val bmVideoCap = networkPolicy?.bookmarkVideoCount() ?: 15
+                val bmBytes = networkPolicy?.bookmarkVideoBytes() ?: (4608L * 1024L)
+                bookmarkIds.take(bmDetailCap).forEachIndexed { idx, animeId ->
                     yieldIfUserActive()
-                    val bookmarkIds = runCatchingCancellable { repository.getBookmarkIdsSnapshot() }
-                        .getOrDefault(emptyList())
-                    val bmCap = if (networkPolicy?.effectivePreloadMode() == PreloadMode.BALANCED) 3 else 8
-                    bookmarkIds.take(bmCap).forEach { id ->
-                        yieldIfUserActive()
-                        warmAnimeDetail(id, highPriority = false)
-                    }
+                    val vBytes = if (idx < bmVideoCap && warmedAnimeVideoIds.add(animeId)) bmBytes else 0L
+                    warmAnimeWithPrimaryVideo(
+                        animeId = animeId,
+                        videoBytes = vBytes,
+                        highPriority = false,
+                        paced = true
+                    )
                 }
+            }
+
+            // Wave 2: Home Popular Strip + Subbed Anime Schedule (every show's start/resume seconds, paced!)
+            if (networkPolicy?.shouldPreloadHomeDetails() != false) {
+                val popularCap = networkPolicy?.homePopularDetailCount() ?: 12
+                val scheduleCap = networkPolicy?.homeScheduleDetailCount() ?: 24
+                val showVideoBytes = networkPolicy?.homeShowVideoBytes() ?: VideoCacheManager.DEFAULT_PRELOAD_BYTES
+
+                feed.popularItems.take(popularCap).forEach { card ->
+                    yieldIfUserActive()
+                    val vBytes = if (warmedAnimeVideoIds.add(card.id)) showVideoBytes else 0L
+                    warmAnimeWithPrimaryVideo(
+                        animeId = card.id,
+                        videoBytes = vBytes,
+                        highPriority = false,
+                        paced = true
+                    )
+                }
+
+                feed.scheduleItems.take(scheduleCap).forEach { card ->
+                    yieldIfUserActive()
+                    val vBytes = if (warmedAnimeVideoIds.add(card.id)) showVideoBytes else 0L
+                    warmAnimeWithPrimaryVideo(
+                        animeId = card.id,
+                        videoBytes = vBytes,
+                        highPriority = false,
+                        paced = true
+                    )
+                }
+            }
+
+            // Wave 2b: Background catalog tabs (HTML + thumbnails)
+            warmCatalogTabsInBackground(feed)
+        }
+    }
+
+    private suspend fun warmCatalogTabsInBackground(feed: HomeFeed) {
+        val catalogDetailCap = networkPolicy?.catalogDetailCount() ?: 10
+        if (warmedCatalogTabs.add("new")) {
+            yieldIfUserActive()
+            val items = fetchChartWithPacing("chart:new") { repository.getNewEpisodes().second }
+            preloadImages(items.map { it.coverUrl }, maxCount = 16, targetSize = ImageTargetSize.STANDARD_CARD)
+            items.take(minOf(6, catalogDetailCap)).forEach { card ->
+                yieldIfUserActive()
+                warmAnimeDetail(card.id, highPriority = false, paced = true)
+            }
+        }
+        if (warmedCatalogTabs.add("popular")) {
+            yieldIfUserActive()
+            val items = fetchChartWithPacing("chart:popular") { repository.getPopularToday().second }
+            preloadImages(items.map { it.coverUrl }, maxCount = 16, targetSize = ImageTargetSize.STANDARD_CARD)
+            items.take(minOf(6, catalogDetailCap)).forEach { card ->
+                yieldIfUserActive()
+                warmAnimeDetail(card.id, highPriority = false, paced = true)
+            }
+        }
+        feed.seasonPath?.takeIf { it.isNotBlank() }?.let { path ->
+            if (warmedCatalogTabs.add(path)) {
+                yieldIfUserActive()
+                val items = fetchChartWithPacing("chart:$path", AnimeHeavenRepository.TTL_SEASONAL_MS) {
+                    repository.getSeasonal(path).second
+                }
+                preloadImages(items.map { it.coverUrl }, maxCount = 12, targetSize = ImageTargetSize.STANDARD_CARD)
             }
         }
     }
 
+    private suspend fun fetchChartWithPacing(
+        cacheKey: String,
+        ttlMs: Long = AnimeHeavenRepository.TTL_CHART_MS,
+        fetch: suspend () -> List<AnimeCard>
+    ): List<AnimeCard> {
+        if (repository.hasFreshChartInMemory(cacheKey, ttlMs)) {
+            return runCatchingCancellable { fetch() }.getOrDefault(emptyList())
+        }
+        awaitOriginBackoffIfNeeded()
+        return originHtmlGate.withPermit {
+            runCatchingCancellable { fetch() }
+                .onSuccess { recordOriginOutcome(null) }
+                .onFailure { recordOriginOutcome(it) }
+                .getOrDefault(emptyList())
+        }
+    }
+
     fun preloadCatalogPage(items: List<AnimeCard>) {
-        preloadImages(items.map { it.coverUrl }, maxCount = 20, targetSize = ImageTargetSize.STANDARD_CARD)
-        val detailCount = networkPolicy?.catalogDetailCount() ?: 6
+        preloadImages(items.map { it.coverUrl }, maxCount = 24, targetSize = ImageTargetSize.STANDARD_CARD)
+        val detailCount = networkPolicy?.catalogDetailCount() ?: 10
+        val videoCount = networkPolicy?.catalogVideoCount() ?: 8
+        val videoBytes = networkPolicy?.homeShowVideoBytes() ?: VideoCacheManager.DEFAULT_PRELOAD_BYTES
         if (detailCount <= 0) return
         scope.launch {
-            items.take(detailCount).forEach { card ->
+            items.take(detailCount).forEachIndexed { idx, card ->
                 yieldIfUserActive()
-                warmAnimeDetail(card.id, highPriority = false)
+                val vBytes = if (idx < videoCount) videoBytes else 0L
+                warmAnimeWithPrimaryVideo(card.id, videoBytes = vBytes, highPriority = false, paced = true)
             }
         }
     }
@@ -350,13 +475,16 @@ class AnimePreloader(
         bookmarks: List<BookmarkEntity>,
         continueItems: List<ContinueWatchingItem>
     ) {
-        preloadImages(bookmarks.map { it.coverUrl }, maxCount = 16, targetSize = ImageTargetSize.STANDARD_CARD)
-        preloadImages(continueItems.map { it.coverUrl }, maxCount = 8, targetSize = ImageTargetSize.CONTINUE_CARD)
+        preloadImages(bookmarks.map { it.coverUrl }, maxCount = 20, targetSize = ImageTargetSize.STANDARD_CARD)
+        preloadImages(continueItems.map { it.coverUrl }, maxCount = 10, targetSize = ImageTargetSize.CONTINUE_CARD)
         if (networkPolicy?.shouldPreloadHomeDetails() == false) return
+        val bmVideoCap = networkPolicy?.bookmarkVideoCount() ?: 15
+        val bmBytes = networkPolicy?.bookmarkVideoBytes() ?: (4608L * 1024L)
         scope.launch {
-            bookmarks.take(8).forEach { bm ->
+            bookmarks.take(15).forEachIndexed { idx, bm ->
                 yieldIfUserActive()
-                warmAnimeDetail(bm.animeId, highPriority = false)
+                val vBytes = if (idx < bmVideoCap) bmBytes else 0L
+                warmAnimeWithPrimaryVideo(bm.animeId, videoBytes = vBytes, highPriority = false, paced = true)
             }
         }
     }
@@ -368,15 +496,21 @@ class AnimePreloader(
                 val normalized = query.trim().lowercase()
                 if (normalized.length >= 2 && warmedSearchQueries.add(normalized)) {
                     yieldIfUserActive()
-                    band1Gate.withPermit {
-                        runCatchingCancellable { repository.fastSearch(query) }.onSuccess { matches ->
-                            preloadImages(
-                                matches.map { it.coverUrl },
-                                maxCount = 4,
-                                targetSize = ImageTargetSize.SEARCH_THUMB
-                            )
-                            matches.firstOrNull()?.let { top -> warmAnimeDetail(top.animeId, highPriority = false) }
-                        }
+                    awaitOriginBackoffIfNeeded()
+                    originHtmlGate.withPermit {
+                        runCatchingCancellable { repository.fastSearch(query) }
+                            .onSuccess { matches ->
+                                recordOriginOutcome(null)
+                                preloadImages(
+                                    matches.map { it.coverUrl },
+                                    maxCount = 4,
+                                    targetSize = ImageTargetSize.SEARCH_THUMB
+                                )
+                                matches.firstOrNull()?.let { top ->
+                                    warmAnimeDetail(top.animeId, highPriority = false)
+                                }
+                            }
+                            .onFailure { recordOriginOutcome(it) }
                     }
                 }
             }
@@ -387,10 +521,15 @@ class AnimePreloader(
         if (items.isEmpty()) return
         preloadImages(items.map { it.coverUrl }, maxCount = 8, targetSize = ImageTargetSize.SEARCH_THUMB)
         if (networkPolicy?.shouldPreloadHomeDetails() == false) return
+        val hoverBytes = networkPolicy?.focusHoverVideoBytes() ?: 0L
         scope.launch {
-            items.take(3).forEach { item ->
+            items.take(3).forEachIndexed { idx, item ->
                 yieldIfUserActive()
-                warmAnimeDetail(item.animeId, highPriority = false)
+                warmAnimeWithPrimaryVideo(
+                    animeId = item.animeId,
+                    videoBytes = if (idx == 0) hoverBytes else 0L,
+                    highPriority = false
+                )
             }
         }
     }
@@ -418,9 +557,13 @@ class AnimePreloader(
         focusPreloadJob?.cancel()
         focusPreloadJob = scope.launch {
             delay(120L)
-            if (animeId !in warmedAnimeDetails) {
-                warmAnimeDetail(animeId, highPriority = true)
-            }
+            val focusBytes = networkPolicy?.focusHoverVideoBytes() ?: 0L
+            warmAnimeWithPrimaryVideo(
+                animeId = animeId,
+                videoBytes = focusBytes,
+                highPriority = true,
+                warmMediaSource = false
+            )
             for (nextId in neighborIds.take(2)) {
                 if (nextId.isNotBlank() && nextId !in warmedAnimeDetails) {
                     yieldIfUserActive()
@@ -430,11 +573,46 @@ class AnimePreloader(
         }
     }
 
+    /**
+     * TV Detail Episode Tile D-pad focus lookahead: after a 200 ms dwell, warms that specific
+     * episode's gate, exact resume/start 5 MB video window, and pre-prepared MediaSource!
+     */
+    @Synchronized
+    fun onEpisodeFocused(
+        animeId: String,
+        animeTitle: String,
+        episodeKey: String,
+        episodeLabel: String,
+        resumePositionMs: Long = 0L,
+        durationMs: Long = 0L
+    ) {
+        if (episodeKey.isBlank() || suspended || !preloadAllowed()) return
+        val bytes = networkPolicy?.focusHoverVideoBytes() ?: 0L
+        if (bytes <= 0L) return
+        episodeFocusPreloadJob?.cancel()
+        episodeFocusPreloadJob = scope.launch {
+            delay(200L)
+            preloadEpisodeBundle(
+                episodeKey = episodeKey,
+                animeId = animeId,
+                animeTitle = animeTitle,
+                episodeLabel = episodeLabel,
+                videoBytes = bytes,
+                resumePositionMs = resumePositionMs,
+                estimatedDurationMs = durationMs,
+                highPriority = true,
+                warmMediaSource = true
+            )
+        }
+    }
+
     @Synchronized
     fun preloadAnimeDetail(
         detail: AnimeDetail,
         primaryEpisodeKey: String?,
-        primaryEpisodeLabel: String?
+        primaryEpisodeLabel: String?,
+        primaryResumeMs: Long = -1L,
+        primaryDurationMs: Long = 0L
     ) {
         if (suspended || !preloadAllowed()) return
         detail.bannerUrl?.let {
@@ -447,44 +625,57 @@ class AnimePreloader(
             targetSize = ImageTargetSize.STANDARD_CARD
         )
 
-        // Warm video CDNs & skip APIs right when user enters Detail (seconds before pressing Watch)
         detailPreloadJob?.cancel()
         detailPreloadJob = scope.launch {
             okHttpClient?.let { NetworkPreconnector.preconnectSkipApisAsync(it) }
             val vcm = videoCacheManagerProvider()
-            val topHosts = vcm.mirrorHealthTracker.topHealthyHosts(limit = 2)
+            val topHosts = vcm.mirrorHealthTracker.topHealthyHosts(limit = 3)
             if (topHosts.isNotEmpty()) {
                 NetworkPreconnector.preconnectCdnHostsAsync(vcm.videoHttpClient, topHosts)
             }
 
             if (!primaryEpisodeKey.isNullOrBlank()) {
-                val primaryBytes = if (networkPolicy?.shouldPreloadVideo() != false) {
-                    3072L * 1024L
+                val primaryBytes = networkPolicy?.detailPrimaryVideoBytes() ?: (8L * 1024L * 1024L)
+                val savedProgress = if (primaryResumeMs < 0L || primaryDurationMs <= 0L) {
+                    runCatchingCancellable { repository.getSavedProgress(primaryEpisodeKey) }.getOrNull()
                 } else {
-                    0L
+                    null
                 }
-                val savedResumeMs = runCatchingCancellable {
-                    repository.getSavedPositionMs(primaryEpisodeKey)
-                }.getOrDefault(0L)
+                val resolvedResumeMs = if (primaryResumeMs >= 0L) {
+                    primaryResumeMs
+                } else {
+                    savedProgress?.let {
+                        AnimeHeavenRepository.resolveResumePositionMs(it.positionMs, it.durationMs)
+                    } ?: 0L
+                }
+                val resolvedDurMs = primaryDurationMs.takeIf { it > 0L }
+                    ?: savedProgress?.durationMs?.takeIf { it > 0L }
+                    ?: 0L
+
                 preloadEpisodeBundle(
                     episodeKey = primaryEpisodeKey,
                     animeId = detail.id,
                     animeTitle = detail.title,
                     episodeLabel = primaryEpisodeLabel.orEmpty(),
                     videoBytes = primaryBytes,
-                    resumePositionMs = savedResumeMs
+                    resumePositionMs = resolvedResumeMs,
+                    estimatedDurationMs = resolvedDurMs,
+                    highPriority = true,
+                    warmMediaSource = true
                 )
 
                 val epIdx = detail.episodes.indexOfFirst { it.key == primaryEpisodeKey }
                 if (epIdx > 0) {
                     val followEp = detail.episodes[epIdx - 1]
                     yieldIfUserActive()
+                    val followupBytes = networkPolicy?.detailFollowupVideoBytes() ?: 0L
                     preloadEpisodeBundle(
                         episodeKey = followEp.key,
                         animeId = detail.id,
                         animeTitle = detail.title,
                         episodeLabel = followEp.numberLabel,
-                        videoBytes = 0L
+                        videoBytes = followupBytes,
+                        highPriority = false
                     )
                 }
             }
@@ -502,59 +693,134 @@ class AnimePreloader(
         nextEpisodeKey: String,
         animeId: String?,
         animeTitle: String,
-        nextEpisodeLabel: String?
+        nextEpisodeLabel: String?,
+        onPrepared: ((PreparedEpisodeWarmup) -> Unit)? = null
     ) {
         if (nextEpisodeKey.isBlank()) return
-        val bytes = networkPolicy?.nextEpisodeInitialBytes() ?: VideoCacheManager.DEFAULT_PRELOAD_BYTES
+        val bytes = networkPolicy?.nextEpisodeInitialBytes() ?: (6L * 1024L * 1024L)
         scope.launch {
-            preloadEpisodeBundle(
+            val prepared = preloadEpisodeBundle(
                 episodeKey = nextEpisodeKey,
                 animeId = animeId,
                 animeTitle = animeTitle,
                 episodeLabel = nextEpisodeLabel.orEmpty(),
-                videoBytes = bytes
+                videoBytes = bytes,
+                highPriority = true,
+                warmMediaSource = false
             )
+            if (prepared != null) {
+                onPrepared?.invoke(prepared)
+            }
         }
     }
 
     fun escalateNextEpisodeBuffer(
         nextEpisodeKey: String,
-        animeId: String?
+        animeId: String?,
+        animeTitle: String = "",
+        nextEpisodeLabel: String? = null,
+        onPrepared: ((PreparedEpisodeWarmup) -> Unit)? = null
     ) {
-        val targetBytes = networkPolicy?.nextEpisodeEscalatedBytes() ?: (8L * 1024L * 1024L)
+        val targetBytes = networkPolicy?.nextEpisodeEscalatedBytes() ?: (20L * 1024L * 1024L)
         if (nextEpisodeKey.isBlank() || targetBytes <= 0L) return
         scope.launch {
-            runCatchingCancellable {
-                val vcm = videoCacheManagerProvider()
-                val stream = repository.resolveEpisodeStream(nextEpisodeKey, animeId)
-                if (stream.videoSources.isNotEmpty()) {
-                    vcm.probeMirrorsSpeed(stream.videoSources)
-                    val ranked = vcm.mirrorHealthTracker.rankMirrors(stream.videoSources)
-                    ranked.firstOrNull()?.let { primaryUrl ->
-                        vcm.preloadVideoHead(
-                            url = primaryUrl,
-                            bytesToCache = targetBytes,
-                            allSources = ranked,
-                            opEndMs = DEFAULT_OP_END_MS,
-                            episodeKey = nextEpisodeKey
-                        )
-                    }
-                }
+            val prepared = preloadEpisodeBundle(
+                episodeKey = nextEpisodeKey,
+                animeId = animeId,
+                animeTitle = animeTitle,
+                episodeLabel = nextEpisodeLabel.orEmpty(),
+                videoBytes = targetBytes,
+                highPriority = true,
+                warmMediaSource = false
+            )
+            if (prepared != null) {
+                onPrepared?.invoke(prepared)
             }
         }
     }
 
-    private suspend fun warmAnimeDetail(animeId: String, highPriority: Boolean): AnimeDetail? {
-        if (!preloadAllowed()) return null
-        if (animeId.isBlank() || !warmedAnimeDetails.add(animeId)) return null
-        if (repository.hasFreshDetailInMemory(animeId)) {
-            return runCatchingCancellable { repository.getAnimeDetail(animeId, forceRefresh = false) }.getOrNull()
+    private data class ResolvedEpisodeTarget(
+        val episodeKey: String,
+        val episodeLabel: String,
+        val resumePositionMs: Long,
+        val durationMs: Long
+    )
+
+    private fun resolveTargetEpisodeForAnime(detail: AnimeDetail): ResolvedEpisodeTarget? {
+        if (detail.episodes.isEmpty()) return null
+        val latest = repository.peekLatestProgressForAnime(detail.id)
+        if (latest != null) {
+            if (!latest.isWatched && latest.positionMs > AnimeHeavenRepository.MIN_RESUME_THRESHOLD_MS) {
+                val resumeMs = AnimeHeavenRepository.resolveResumePositionMs(latest.positionMs, latest.durationMs)
+                return ResolvedEpisodeTarget(
+                    episodeKey = latest.episodeKey,
+                    episodeLabel = latest.episodeLabel,
+                    resumePositionMs = resumeMs,
+                    durationMs = latest.durationMs
+                )
+            }
+            if (latest.isWatched) {
+                val idx = detail.episodes.indexOfFirst { it.key == latest.episodeKey }
+                if (idx > 0) {
+                    val nextEp = detail.episodes[idx - 1]
+                    return ResolvedEpisodeTarget(nextEp.key, nextEp.numberLabel, 0L, 0L)
+                }
+                val nextKey = latest.nextEpisodeKey?.takeIf { it.isNotBlank() }
+                if (nextKey != null) {
+                    return ResolvedEpisodeTarget(nextKey, latest.nextEpisodeLabel.orEmpty(), 0L, 0L)
+                }
+            }
         }
-        val gate = if (highPriority) band0Gate else band1Gate
-        return gate.withPermit {
+        val firstEp = detail.episodes.last()
+        return ResolvedEpisodeTarget(firstEp.key, firstEp.numberLabel, 0L, 0L)
+    }
+
+    private suspend fun warmAnimeWithPrimaryVideo(
+        animeId: String,
+        videoBytes: Long,
+        highPriority: Boolean,
+        warmMediaSource: Boolean = false,
+        paced: Boolean = false
+    ) {
+        if (!preloadAllowed() || animeId.isBlank()) return
+        val detail = repository.peekCachedDetail(animeId)
+            ?: warmAnimeDetail(animeId, highPriority = highPriority, paced = paced)
+            ?: return
+        if (videoBytes <= 0L || !videoPreloadAllowed()) return
+        val target = resolveTargetEpisodeForAnime(detail) ?: return
+        preloadEpisodeBundle(
+            episodeKey = target.episodeKey,
+            animeId = detail.id,
+            animeTitle = detail.title,
+            episodeLabel = target.episodeLabel,
+            videoBytes = videoBytes,
+            resumePositionMs = target.resumePositionMs,
+            estimatedDurationMs = target.durationMs,
+            highPriority = highPriority,
+            warmMediaSource = warmMediaSource,
+            paced = paced
+        )
+    }
+
+    private suspend fun warmAnimeDetail(
+        animeId: String,
+        highPriority: Boolean,
+        paced: Boolean = false
+    ): AnimeDetail? {
+        if (!preloadAllowed() || animeId.isBlank()) return null
+        if (repository.hasFreshDetailInMemory(animeId)) {
+            warmedAnimeDetails.add(animeId)
+            return repository.peekCachedDetail(animeId)
+        }
+        if (!warmedAnimeDetails.add(animeId)) {
+            return repository.peekCachedDetail(animeId)
+        }
+        if (!highPriority) awaitOriginBackoffIfNeeded()
+        return originHtmlGate.withPermit {
+            if (paced) delay(WAVE2_ORIGIN_PACING_MS)
             runCatchingCancellable { repository.getAnimeDetail(animeId, forceRefresh = false) }
                 .onSuccess { detail ->
-                    // Match EXACT AnimeDetailScreen decode dimensions (eliminates 100% RAM cache miss!)
+                    recordOriginOutcome(null)
                     detail.bannerUrl?.let {
                         preloadImages(listOf(it), maxCount = 1, targetSize = ImageTargetSize.HERO_BANNER)
                     }
@@ -562,7 +828,8 @@ class AnimePreloader(
                         preloadImages(listOf(detail.posterUrl), maxCount = 1, targetSize = ImageTargetSize.DETAIL_POSTER)
                     }
                 }
-                .onFailure {
+                .onFailure { err ->
+                    recordOriginOutcome(err)
                     warmedAnimeDetails.remove(animeId)
                 }
                 .getOrNull()
@@ -576,46 +843,133 @@ class AnimePreloader(
         episodeLabel: String,
         videoBytes: Long,
         resumePositionMs: Long = 0L,
-        estimatedDurationMs: Long = 0L
-    ) {
-        if (episodeKey.isBlank()) return
+        estimatedDurationMs: Long = 0L,
+        highPriority: Boolean = true,
+        warmMediaSource: Boolean = false,
+        paced: Boolean = false
+    ): PreparedEpisodeWarmup? {
+        if (episodeKey.isBlank() || !preloadAllowed()) return null
+        val effectiveVideoBytes = if (videoPreloadAllowed()) videoBytes else 0L
+        val alreadyWarmedBytes = warmedVideoBytesByEpisode[episodeKey] ?: 0L
         val firstEpisodeWarm = warmedEpisodeStreams.add(episodeKey)
-        if (!firstEpisodeWarm && videoBytes <= 0L) return
+        val needsMoreVideo = effectiveVideoBytes > alreadyWarmedBytes
+        if (!firstEpisodeWarm && !needsMoreVideo && !warmMediaSource) {
+            return buildPreparedSnapshotIfWarm(episodeKey, resumePositionMs, estimatedDurationMs)
+        }
 
-        band0Gate.withPermit {
-            runCatchingCancellable {
-                val vcm = videoCacheManagerProvider()
-                val stream = repository.resolveEpisodeStream(episodeKey, animeId)
-                val title = stream.animeTitle.ifBlank { animeTitle }
-                val label = stream.episodeLabel.ifBlank { episodeLabel }
-                val epNum = SkipTimesParser.parseEpisodeNumber(label)
-                if (epNum != null && title.isNotBlank()) {
-                    scope.launch {
-                        runCatchingCancellable { skipTimesClientProvider().fetchSkipTimes(title, epNum) }
+        val stream = repository.peekCachedStream(episodeKey)?.takeIf {
+            !repository.isCachedStreamStale(episodeKey) && it.videoSources.isNotEmpty()
+        } ?: run {
+            if (!highPriority) awaitOriginBackoffIfNeeded()
+            originHtmlGate.withPermit {
+                if (paced) delay(WAVE2_ORIGIN_PACING_MS)
+                runCatchingCancellable { repository.resolveEpisodeStream(episodeKey, animeId) }
+                    .onSuccess { recordOriginOutcome(null) }
+                    .onFailure { err ->
+                        recordOriginOutcome(err)
+                        warmedEpisodeStreams.remove(episodeKey)
                     }
+                    .getOrNull()
+            }
+        } ?: return null
+
+        val title = stream.animeTitle.ifBlank { animeTitle }
+        val label = stream.episodeLabel.ifBlank { episodeLabel }
+        val epNum = SkipTimesParser.parseEpisodeNumber(label)
+        var resolvedSkipTimes = EpisodeSkipTimes()
+        if (epNum != null && title.isNotBlank()) {
+            if (highPriority) {
+                scope.launch {
+                    runCatchingCancellable { skipTimesClientProvider().fetchSkipTimes(title, epNum) }
                 }
-                if (stream.videoSources.isNotEmpty()) {
-                    vcm.probeMirrorsSpeed(stream.videoSources)
-                    if (videoBytes > 0L) {
-                        val ranked = vcm.mirrorHealthTracker.rankMirrors(stream.videoSources)
-                        ranked.firstOrNull()?.let { primaryUrl ->
-                            val durMs = if (estimatedDurationMs > 0L) estimatedDurationMs else DEFAULT_EP_DURATION_MS
-                            vcm.preloadVideoHead(
-                                url = primaryUrl,
-                                bytesToCache = videoBytes,
-                                allSources = ranked,
-                                resumePositionMs = resumePositionMs,
-                                estimatedDurationMs = durMs,
-                                opEndMs = DEFAULT_OP_END_MS,
-                                episodeKey = episodeKey
-                            )
-                        }
-                    }
-                }
-            }.onFailure {
-                warmedEpisodeStreams.remove(episodeKey)
             }
         }
+
+        if (stream.videoSources.isEmpty()) return null
+        val vcm = videoCacheManagerProvider()
+
+        return videoWarmupGate.withPermit {
+            runCatchingCancellable {
+                val ranked = vcm.mirrorHealthTracker.rankMirrors(stream.videoSources)
+                val primaryUrl = ranked.firstOrNull() ?: return@runCatchingCancellable null
+
+                if (effectiveVideoBytes > 0L) {
+                    val existingIdx = vcm.getVideoIndex(episodeKey)
+                    val durMs = when {
+                        estimatedDurationMs > 0L -> estimatedDurationMs
+                        existingIdx != null && existingIdx.durationMs > 0L -> existingIdx.durationMs
+                        else -> DEFAULT_EP_DURATION_MS
+                    }
+                    val opEndMs = resolvedSkipTimes.op?.endMs ?: DEFAULT_OP_END_MS
+                    val readyCacheKey = vcm.preloadVideoHeadAndAwait(
+                        url = primaryUrl,
+                        bytesToCache = effectiveVideoBytes,
+                        allSources = ranked,
+                        resumePositionMs = resumePositionMs,
+                        estimatedDurationMs = durMs,
+                        opEndMs = opEndMs,
+                        episodeKey = episodeKey
+                    )
+                    if (readyCacheKey != null) {
+                        warmedVideoBytesByEpisode.merge(episodeKey, effectiveVideoBytes) { old, incoming ->
+                            maxOf(old, incoming)
+                        }
+                        if (warmMediaSource) {
+                            vcm.warmupPool.preloadEpisode(
+                                episodeKey = episodeKey,
+                                url = primaryUrl,
+                                cacheKey = readyCacheKey,
+                                resumePositionMs = resumePositionMs
+                            )
+                        }
+                        val refreshedRanked = vcm.mirrorHealthTracker.rankMirrors(stream.videoSources)
+                        val refreshedDur = vcm.getVideoIndex(episodeKey)?.durationMs
+                            ?.takeIf { it > 0L } ?: estimatedDurationMs
+                        if (epNum != null && title.isNotBlank()) {
+                            resolvedSkipTimes = runCatchingCancellable {
+                                skipTimesClientProvider().fetchSkipTimes(title, epNum)
+                            }.getOrDefault(EpisodeSkipTimes())
+                        }
+                        return@runCatchingCancellable PreparedEpisodeWarmup(
+                            episodeKey = episodeKey,
+                            stream = stream,
+                            rankedMirrors = refreshedRanked,
+                            cacheKey = readyCacheKey,
+                            skipTimes = resolvedSkipTimes,
+                            durationMs = refreshedDur
+                        )
+                    }
+                } else {
+                    vcm.probeMirrorsSpeed(stream.videoSources)
+                }
+                null
+            }.getOrNull()
+        }
+    }
+
+    private fun buildPreparedSnapshotIfWarm(
+        episodeKey: String,
+        resumePositionMs: Long,
+        estimatedDurationMs: Long
+    ): PreparedEpisodeWarmup? {
+        val stream = repository.peekCachedStream(episodeKey) ?: return null
+        if (stream.videoSources.isEmpty()) return null
+        val vcm = videoCacheManagerProvider()
+        val ranked = vcm.mirrorHealthTracker.rankMirrors(stream.videoSources)
+        val primary = ranked.firstOrNull() ?: return null
+        val cacheKey = vcm.resolveCacheKey(episodeKey, primary)
+        if (!vcm.hasPlayableHotWindow(episodeKey, cacheKey, resumePositionMs, estimatedDurationMs)) {
+            return null
+        }
+        val dur = vcm.getVideoIndex(episodeKey)?.durationMs?.takeIf { it > 0L } ?: estimatedDurationMs
+        return PreparedEpisodeWarmup(
+            episodeKey = episodeKey,
+            stream = stream,
+            rankedMirrors = ranked,
+            cacheKey = cacheKey,
+            skipTimes = EpisodeSkipTimes(),
+            durationMs = dur
+        )
     }
 
     suspend fun <T> withoutPreloading(block: suspend () -> T): T {
@@ -631,12 +985,16 @@ class AnimePreloader(
                 warmedAnimeDetails.clear()
                 warmedCatalogTabs.clear()
                 warmedEpisodeStreams.clear()
+                warmedVideoBytesByEpisode.clear()
                 warmedSearchQueries.clear()
                 lastHomeEcosystemSignature = null
                 lastWarmedTopContinueKey = null
                 focusPreloadJob = null
+                episodeFocusPreloadJob = null
                 detailPreloadJob = null
                 homeEcosystemJob = null
+                originBackoffUntilMs = 0L
+                originBackoffDurationMs = 0L
                 suspended = false
             }
         }
@@ -645,7 +1003,9 @@ class AnimePreloader(
     companion object {
         private const val DEFAULT_EP_DURATION_MS = 24L * 60_000L
         private const val DEFAULT_OP_END_MS = 85_000L
-        private const val BAND1_STARTUP_GRACE_MS = 1_800L
+        private const val WAVE1_STARTUP_GRACE_MS = 350L
+        private const val WAVE2_ORIGIN_PACING_MS = 150L
+        private const val MAX_ORIGIN_BACKOFF_MS = 15_000L
         private const val USER_YIELD_MAX_WAIT_MS = 6_000L
     }
 }

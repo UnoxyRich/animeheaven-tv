@@ -569,9 +569,10 @@ fun AnimeDetailScreen(
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
                                 rowEpisodes.forEach { ep ->
+                                    val epProg = state.progressMap[ep.key]
                                     EpisodeNetflixTile(
                                         episode = ep,
-                                        progress = state.progressMap[ep.key],
+                                        progress = epProg,
                                         onClick = {
                                             onPlayEpisode(
                                                 ep.key,
@@ -579,6 +580,9 @@ fun AnimeDetailScreen(
                                                 detail.title,
                                                 viewModel.landscapeCover(detail)
                                             )
+                                        },
+                                        onFocused = {
+                                            viewModel.onEpisodeFocused(detail, ep, epProg)
                                         },
                                         modifier = Modifier.weight(1f)
                                     )
@@ -626,6 +630,7 @@ private fun EpisodeNetflixTile(
     episode: EpisodeItem,
     progress: WatchProgressEntity?,
     onClick: () -> Unit,
+    onFocused: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val palette = LocalAhPalette.current
@@ -646,7 +651,10 @@ private fun EpisodeNetflixTile(
         focusedBorderColor = palette.focusBorder,
         borderWidth = 1.dp,
         focusedBorderWidth = 2.5.dp,
-        focusScale = 1.06f
+        focusScale = 1.06f,
+        onFocusStateChanged = { focused ->
+            if (focused) onFocused()
+        }
     ) { isFocused ->
         Box(modifier = Modifier.fillMaxSize()) {
             Column(

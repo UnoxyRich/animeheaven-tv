@@ -13,7 +13,6 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.ContentMetadata
 import androidx.media3.datasource.cache.ContentMetadataMutations
-import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -32,7 +31,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,11 +39,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import me.animeheaven.tv.data.network.AnimeHeavenClient
 import me.animeheaven.tv.data.network.awaitResponse
+import me.animeheaven.tv.data.runCatchingCancellable
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
@@ -179,7 +179,7 @@ class MirrorHealthTracker(
         return stats.failureCount > 0 && (clockMs() - stats.lastFailureAtMs) < FAILURE_COOLDOWN_MS
     }
 
-    fun topHealthyHosts(limit: Int = 2): List<String> {
+    fun topHealthyHosts(limit: Int = 3): List<String> {
         val now = clockMs()
         return statsByHost.entries
             .asSequence()
@@ -261,13 +261,20 @@ class VideoCacheManager(
     )
 ) {
     private val appContext = context.applicationContext
+    private val isLowRamDevice: Boolean = run {
+        val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        am?.isLowRamDevice == true || (am?.memoryClass ?: 256) <= 192
+    }
     private val cacheDir = File(appContext.cacheDir, "video_cache").apply { mkdirs() }
     private val boosterLock = Any()
     private var boosterStartJob: Job? = null
     private val databaseProvider = StandaloneDatabaseProvider(appContext)
+    val cacheEvictor = PinnedPriorityCacheEvictor(
+        maxBytes = calculateVideoCacheMaxBytes(appContext.cacheDir.usableSpace)
+    )
     val simpleCache: SimpleCache = SimpleCache(
         cacheDir,
-        LeastRecentlyUsedCacheEvictor(calculateVideoCacheMaxBytes(appContext.cacheDir.usableSpace)),
+        cacheEvictor,
         databaseProvider
     )
 
@@ -275,11 +282,11 @@ class VideoCacheManager(
         .cache(null)
         .dispatcher(
             Dispatcher().apply {
-                maxRequests = 24
-                maxRequestsPerHost = 8
+                maxRequests = 32
+                maxRequestsPerHost = 10
             }
         )
-        .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
+        .connectionPool(ConnectionPool(20, 5, TimeUnit.MINUTES))
         .retryOnConnectionFailure(true)
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
@@ -320,29 +327,108 @@ class VideoCacheManager(
     private val activePreloadJobs = ConcurrentHashMap<String, Job>()
     private val activeWriters = ConcurrentHashMap<String, CacheWriter>()
     private val probeMetaByUrl = LruCacheMap<String, VideoProbeMeta>(MAX_PROBE_CACHE)
+    private val videoIndexByEpisode = LruCacheMap<String, EpisodeVideoIndex>(MAX_VIDEO_INDEX_CACHE)
+    private val diskLengthByEpisode = ConcurrentHashMap<String, Long>()
+
+    @Volatile
+    private var videoIndexPersistence: (suspend (EpisodeVideoIndex) -> Unit)? = null
+
+    val warmupPool: PlayerWarmupPool by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        PlayerWarmupPool(appContext, buildProgressiveMediaSourceFactory())
+    }
 
     val chunkBooster = StreamingChunkBooster(
         simpleCache = simpleCache,
         cacheSinkFactory = cacheSinkFactory,
         videoHttpClient = videoHttpClient,
-        mirrorHealthTracker = mirrorHealthTracker
+        mirrorHealthTracker = mirrorHealthTracker,
+        cacheEvictor = cacheEvictor,
+        lowRamDevice = isLowRamDevice,
+        onVideoIndexReady = { index ->
+            recordVideoIndex(index)
+            videoIndexPersistence?.invoke(index)
+        }
     )
 
+    init {
+        scanExistingDiskKeys()
+    }
+
+    fun setVideoIndexPersistence(callback: suspend (EpisodeVideoIndex) -> Unit) {
+        videoIndexPersistence = callback
+    }
+
+    fun hydrateVideoIndices(indices: List<EpisodeVideoIndex>) {
+        for (idx in indices) {
+            if (idx.episodeKey.isBlank() || idx.contentLength < MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) continue
+            videoIndexByEpisode[idx.episodeKey] = idx
+            diskLengthByEpisode[idx.episodeKey] = idx.contentLength
+            val key = buildEpisodeCacheKey(idx.episodeKey, idx.contentLength, "")
+            if (idx.moovOffset >= 0L && idx.moovSize > 0L) {
+                cacheEvictor.markHotWindow(
+                    key,
+                    StreamingChunkBooster.alignChunkStart(idx.moovOffset),
+                    minOf(idx.contentLength, idx.moovOffset + idx.moovSize)
+                )
+            }
+            cacheEvictor.markHotWindow(key, 0L, minOf(idx.contentLength, CHUNK_SIZE_BYTES))
+        }
+    }
+
+    fun scanExistingDiskKeys() {
+        runCatching {
+            for (key in simpleCache.keys) {
+                if (!key.startsWith("ep:")) continue
+                val lastColon = key.lastIndexOf(':')
+                if (lastColon <= 3) continue
+                val epKey = key.substring(3, lastColon)
+                val len = key.substring(lastColon + 1).toLongOrNull() ?: continue
+                if (epKey.isNotBlank() && len >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) {
+                    diskLengthByEpisode[epKey] = len
+                }
+            }
+        }
+    }
+
+    private fun recordVideoIndex(index: EpisodeVideoIndex) {
+        videoIndexByEpisode[index.episodeKey] = index
+        if (index.contentLength >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) {
+            diskLengthByEpisode[index.episodeKey] = index.contentLength
+        }
+    }
+
+    fun getVideoIndex(episodeKey: String?): EpisodeVideoIndex? =
+        episodeKey?.takeIf { it.isNotBlank() }?.let { videoIndexByEpisode[it] }
+
+    fun resolveKnownContentLength(episodeKey: String?, url: String? = null): Long {
+        if (!url.isNullOrBlank()) {
+            val probeLen = probeMetaByUrl[url]?.contentLength ?: -1L
+            if (probeLen >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) return probeLen
+        }
+        if (!episodeKey.isNullOrBlank()) {
+            videoIndexByEpisode[episodeKey]?.contentLength?.takeIf {
+                it >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES
+            }?.let { return it }
+            diskLengthByEpisode[episodeKey]?.takeIf {
+                it >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES
+            }?.let { return it }
+        }
+        return -1L
+    }
+
     fun buildFastLoadControl(): LoadControl {
-        val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-        val isLowRam = am?.isLowRamDevice == true || (am?.memoryClass ?: 256) <= 192
-        val minBufMs = if (isLowRam) 15_000 else 25_000
-        val maxBufMs = if (isLowRam) 35_000 else 55_000
-        val backBufMs = if (isLowRam) 10_000 else 15_000
-        val targetBytes = if (isLowRam) 24 * 1024 * 1024 else 48 * 1024 * 1024
+        val minBufMs = if (isLowRamDevice) 20_000 else 30_000
+        val maxBufMs = if (isLowRamDevice) 40_000 else 60_000
+        val backBufMs = if (isLowRamDevice) 10_000 else 15_000
+        val targetBytes = if (isLowRamDevice) 24 * 1024 * 1024 else 48 * 1024 * 1024
 
         return DefaultLoadControl.Builder()
             .setAllocator(DefaultAllocator(true, 64 * 1024))
             .setBufferDurationsMs(
                 /* minBufferMs = */ minBufMs,
                 /* maxBufferMs = */ maxBufMs,
-                /* bufferForPlaybackMs = */ 250,
-                /* bufferForPlaybackAfterRebufferMs = */ 750
+                /* bufferForPlaybackMs = */ 200,
+                /* bufferForPlaybackAfterRebufferMs = */ 500
             )
             .setTargetBufferBytes(targetBytes)
             .setBackBuffer(backBufMs, true)
@@ -351,10 +437,62 @@ class VideoCacheManager(
     }
 
     fun resolveCacheKey(episodeKey: String?, url: String): String {
-        val meta = probeMetaByUrl[url]
-        val contentLength = meta?.contentLength ?: -1L
+        val contentLength = resolveKnownContentLength(episodeKey, url)
         return buildEpisodeCacheKey(episodeKey, contentLength, url)
     }
+
+    /**
+     * Checks whether [cacheKey] already holds enough local bytes on disk (header + tail moov if
+     * non-faststart + at least [minBytes] at [resumePositionMs]) to begin playback immediately at
+     * 0 ms without blocking on network probes.
+     */
+    fun hasPlayableHotWindow(
+        episodeKey: String?,
+        cacheKey: String,
+        resumePositionMs: Long,
+        estimatedDurationMs: Long = 0L,
+        minBytes: Long = MIN_PLAYABLE_HOT_BYTES
+    ): Boolean {
+        val totalLen = resolveKnownContentLength(episodeKey)
+        if (totalLen < MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) return false
+        val index = getVideoIndex(episodeKey)
+        val headCheckLen = minOf(128L * 1024L, totalLen)
+        val hasHead = runCatching {
+            simpleCache.getCachedBytes(cacheKey, 0L, headCheckLen) >= headCheckLen
+        }.getOrDefault(false)
+        if (!hasHead) return false
+
+        if (index != null && index.isMoovAtTail && index.moovSize > 0L) {
+            val moovLen = minOf(index.moovSize, totalLen - index.moovOffset)
+            val hasMoov = runCatching {
+                simpleCache.getCachedBytes(cacheKey, index.moovOffset, moovLen) >= moovLen
+            }.getOrDefault(false)
+            if (!hasMoov) return false
+        }
+
+        val durMs = when {
+            index != null && index.durationMs > 0L -> index.durationMs
+            else -> estimatedDurationMs
+        }
+        val targetStart = if (resumePositionMs > 10_000L && durMs > 0L) {
+            StreamingChunkBooster.alignChunkStart(
+                StreamingChunkBooster.resolveByteOffset(index, resumePositionMs, durMs, totalLen)
+            )
+        } else {
+            0L
+        }
+        val windowLen = minOf(minBytes, (totalLen - targetStart).coerceAtLeast(0L))
+        if (windowLen <= 0L) return false
+        val cachedAtTarget = runCatching {
+            simpleCache.getCachedBytes(cacheKey, targetStart, windowLen)
+        }.getOrDefault(0L)
+        return cachedAtTarget >= (windowLen * 3L) / 4L
+    }
+
+    fun getCachedBytesAtWindow(cacheKey: String, startByte: Long, windowBytes: Long): Long =
+        runCatching {
+            simpleCache.getCachedBytes(cacheKey, startByte.coerceAtLeast(0L), windowBytes.coerceAtLeast(0L))
+        }.getOrDefault(0L)
 
     suspend fun probeMirrorsSpeed(urls: List<String>) {
         if (urls.isEmpty()) return
@@ -374,11 +512,6 @@ class VideoCacheManager(
         }
     }
 
-    /**
-     * Races mirror probes and returns as soon as the FIRST valid full-length (>= 1 MB) mirror
-     * responds (~80-150ms) instead of stalling up to 950ms on the slowest/dead mirror. Remaining
-     * mirror probes continue asynchronously in [scope] so they can still join [chunkBooster].
-     */
     suspend fun probeMirrorsForPlayback(urls: List<String>, maxWaitMs: Long = 900L) {
         if (urls.isEmpty()) return
         val alreadyHaveValid = urls.any { url ->
@@ -412,6 +545,16 @@ class VideoCacheManager(
         }
         withTimeoutOrNull(maxWaitMs) {
             firstValidReady.await()
+        }
+    }
+
+    fun probeMirrorsInBackground(urls: List<String>) {
+        val needsProbe = urls.filter { url ->
+            probeMetaByUrl[url] == null || !mirrorHealthTracker.hasFreshStats(url)
+        }.distinct()
+        if (needsProbe.isEmpty()) return
+        scope.launch {
+            needsProbe.forEach { url -> launch { probeSingleMirror(url) } }
         }
     }
 
@@ -458,17 +601,23 @@ class VideoCacheManager(
 
     fun getProbeMeta(url: String): VideoProbeMeta? = probeMetaByUrl[url]
 
-    fun getVerifiedRangeMirrors(primaryUrl: String, candidates: List<String>): List<String> {
+    fun getVerifiedRangeMirrors(primaryUrl: String, candidates: List<String>, knownLength: Long = -1L): List<String> {
         val primaryMeta = probeMetaByUrl[primaryUrl]
-        if (primaryMeta == null || !primaryMeta.supportsRanges || primaryMeta.contentLength < MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) {
-            return if (primaryMeta?.supportsRanges == true) listOf(primaryUrl) else emptyList()
+        val expectedLen = when {
+            primaryMeta != null && primaryMeta.supportsRanges && primaryMeta.contentLength >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES ->
+                primaryMeta.contentLength
+            knownLength >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES -> knownLength
+            else -> return if (primaryMeta?.supportsRanges == true) listOf(primaryUrl) else emptyList()
         }
-        val expectedLen = primaryMeta.contentLength
         val matching = candidates
             .distinct()
             .filter { url ->
                 val meta = probeMetaByUrl[url]
-                meta != null && meta.supportsRanges && meta.contentLength == expectedLen
+                if (meta != null) {
+                    meta.supportsRanges && meta.contentLength == expectedLen
+                } else {
+                    knownLength >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES
+                }
             }
             .ifEmpty { listOf(primaryUrl) }
         return mirrorHealthTracker.rankMirrors(matching)
@@ -482,72 +631,152 @@ class VideoCacheManager(
         estimatedDurationMs: Long = 0L,
         opEndMs: Long = 0L,
         episodeKey: String? = null
-    ) {
-        if (url.isBlank()) return
+    ): Job? {
+        if (url.isBlank()) return null
         val jobKey = episodeKey?.takeIf { it.isNotBlank() } ?: url
-        if (activePreloadJobs[jobKey]?.isActive == true) return
+        activePreloadJobs[jobKey]?.takeIf { it.isActive }?.let { return it }
 
         val job = scope.launch {
             try {
-                if (allSources.size > 1 && probeMetaByUrl[url] == null) {
-                    probeMirrorsSpeed(allSources)
-                } else if (probeMetaByUrl[url] == null) {
-                    probeMirrorsSpeed(listOf(url))
-                }
-
-                val meta = probeMetaByUrl[url]
-                val verifiedMirrors = getVerifiedRangeMirrors(url, allSources)
-                val cacheKey = buildEpisodeCacheKey(episodeKey, meta?.contentLength ?: -1L, url)
-                if (meta != null && verifiedMirrors.isNotEmpty() && meta.supportsRanges && meta.contentLength >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) {
-                    applyContentLengthMetadata(cacheKey, meta.contentLength)
-                    chunkBooster.preloadInitialWindows(
-                        cacheKey = cacheKey,
-                        mirrors = verifiedMirrors,
-                        totalLength = meta.contentLength,
-                        targetBytes = bytesToCache,
-                        resumePositionMs = resumePositionMs,
-                        estimatedDurationMs = estimatedDurationMs,
-                        opEndMs = opEndMs
-                    )
-                    mirrorHealthTracker.recordSuccess(url, meta.latencyMs)
-                    return@launch
-                }
-
-                val alreadyCached = runCatching {
-                    simpleCache.getCachedBytes(cacheKey, 0L, bytesToCache)
-                }.getOrDefault(0L)
-                if (alreadyCached >= bytesToCache / 2L) {
-                    mirrorHealthTracker.recordSuccess(url, latencyMs = 20L)
-                    return@launch
-                }
-
-                val dataSpec = DataSpec.Builder()
-                    .setUri(Uri.parse(url))
-                    .setKey(cacheKey)
-                    .setPosition(0L)
-                    .setLength(bytesToCache)
-                    .build()
-
-                val dataSource = cacheDataSourceFactory.createDataSourceForDownloading()
-                val writer = CacheWriter(dataSource, dataSpec, ByteArray(DEFAULT_BUFFER_SIZE), null)
-                activeWriters[jobKey] = writer
-                val startNs = System.nanoTime()
-                try {
-                    writer.cache()
-                    val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
-                    mirrorHealthTracker.recordSuccess(url, elapsedMs)
-                } finally {
-                    activeWriters.remove(jobKey)
-                }
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (_: Exception) {
-                mirrorHealthTracker.recordFailure(url)
+                executePreloadVideoHead(
+                    url = url,
+                    bytesToCache = bytesToCache,
+                    allSources = allSources,
+                    resumePositionMs = resumePositionMs,
+                    estimatedDurationMs = estimatedDurationMs,
+                    opEndMs = opEndMs,
+                    episodeKey = episodeKey,
+                    jobKey = jobKey
+                )
             } finally {
                 activePreloadJobs.remove(jobKey)
             }
         }
         activePreloadJobs[jobKey] = job
+        return job
+    }
+
+    /**
+     * Suspends until the requested preload window has been committed to [simpleCache],
+     * returning the resolved `cacheKey` if playable bytes are now on disk.
+     */
+    suspend fun preloadVideoHeadAndAwait(
+        url: String,
+        bytesToCache: Long = DEFAULT_PRELOAD_BYTES,
+        allSources: List<String> = listOf(url),
+        resumePositionMs: Long = 0L,
+        estimatedDurationMs: Long = 0L,
+        opEndMs: Long = 0L,
+        episodeKey: String? = null
+    ): String? {
+        if (url.isBlank()) return null
+        val jobKey = episodeKey?.takeIf { it.isNotBlank() } ?: url
+        activePreloadJobs[jobKey]?.takeIf { it.isActive }?.join()
+        val job = preloadVideoHead(
+            url = url,
+            bytesToCache = bytesToCache,
+            allSources = allSources,
+            resumePositionMs = resumePositionMs,
+            estimatedDurationMs = estimatedDurationMs,
+            opEndMs = opEndMs,
+            episodeKey = episodeKey
+        )
+        job?.join()
+        val cacheKey = resolveCacheKey(episodeKey, url)
+        return if (hasPlayableHotWindow(episodeKey, cacheKey, resumePositionMs, estimatedDurationMs)) {
+            cacheKey
+        } else {
+            null
+        }
+    }
+
+    private suspend fun executePreloadVideoHead(
+        url: String,
+        bytesToCache: Long,
+        allSources: List<String>,
+        resumePositionMs: Long,
+        estimatedDurationMs: Long,
+        opEndMs: Long,
+        episodeKey: String?,
+        jobKey: String
+    ) {
+        try {
+            if (allSources.size > 1 && probeMetaByUrl[url] == null) {
+                probeMirrorsSpeed(allSources)
+            } else if (probeMetaByUrl[url] == null) {
+                probeMirrorsSpeed(listOf(url))
+            }
+
+            val meta = probeMetaByUrl[url]
+            val knownLen = meta?.contentLength?.takeIf { it >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES }
+                ?: resolveKnownContentLength(episodeKey, url)
+            val verifiedMirrors = getVerifiedRangeMirrors(url, allSources, knownLen)
+            val cacheKey = buildEpisodeCacheKey(episodeKey, knownLen, url)
+            if (knownLen >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES && verifiedMirrors.isNotEmpty()) {
+                if (!episodeKey.isNullOrBlank()) {
+                    diskLengthByEpisode[episodeKey] = knownLen
+                }
+                applyContentLengthMetadata(cacheKey, knownLen)
+                val existingIdx = getVideoIndex(episodeKey)
+                val parsed = chunkBooster.preloadInitialWindows(
+                    cacheKey = cacheKey,
+                    mirrors = verifiedMirrors,
+                    totalLength = knownLen,
+                    targetBytes = bytesToCache,
+                    resumePositionMs = resumePositionMs,
+                    estimatedDurationMs = estimatedDurationMs,
+                    opEndMs = opEndMs,
+                    episodeKey = episodeKey,
+                    existingIndex = existingIdx
+                )
+                if (parsed == null && existingIdx == null && !episodeKey.isNullOrBlank()) {
+                    // Still persist contentLength so cold starts resolve cacheKey in 0 ms!
+                    val basicIdx = EpisodeVideoIndex(
+                        episodeKey = episodeKey,
+                        contentLength = knownLen,
+                        durationMs = estimatedDurationMs.coerceAtLeast(0L),
+                        updatedAtMs = System.currentTimeMillis()
+                    )
+                    recordVideoIndex(basicIdx)
+                    runCatchingCancellable { videoIndexPersistence?.invoke(basicIdx) }
+                }
+                if (meta != null) {
+                    mirrorHealthTracker.recordSuccess(url, meta.latencyMs)
+                }
+                return
+            }
+
+            val alreadyCached = runCatching {
+                simpleCache.getCachedBytes(cacheKey, 0L, bytesToCache)
+            }.getOrDefault(0L)
+            if (alreadyCached >= bytesToCache / 2L) {
+                mirrorHealthTracker.recordSuccess(url, latencyMs = 20L)
+                return
+            }
+
+            val dataSpec = DataSpec.Builder()
+                .setUri(Uri.parse(url))
+                .setKey(cacheKey)
+                .setPosition(0L)
+                .setLength(bytesToCache)
+                .build()
+
+            val dataSource = cacheDataSourceFactory.createDataSourceForDownloading()
+            val writer = CacheWriter(dataSource, dataSpec, ByteArray(DEFAULT_BUFFER_SIZE), null)
+            activeWriters[jobKey] = writer
+            val startNs = System.nanoTime()
+            try {
+                writer.cache()
+                val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
+                mirrorHealthTracker.recordSuccess(url, elapsedMs)
+            } finally {
+                activeWriters.remove(jobKey)
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            mirrorHealthTracker.recordFailure(url)
+        }
     }
 
     fun startPlaybackBooster(
@@ -561,27 +790,34 @@ class VideoCacheManager(
     ) = synchronized(boosterLock) {
         stopPlaybackBooster()
         boosterStartJob = scope.launch {
+            var knownLen = resolveKnownContentLength(episodeKey, activeUrl)
             if (probeMetaByUrl[activeUrl] == null) {
-                probeMirrorsSpeed(allSources.ifEmpty { listOf(activeUrl) })
+                if (knownLen >= MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) {
+                    probeMirrorsInBackground(allSources.ifEmpty { listOf(activeUrl) })
+                } else {
+                    probeMirrorsSpeed(allSources.ifEmpty { listOf(activeUrl) })
+                    knownLen = resolveKnownContentLength(episodeKey, activeUrl)
+                }
             }
-            val meta = probeMetaByUrl[activeUrl] ?: return@launch
-            if (!meta.supportsRanges || meta.contentLength < MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) {
+            if (knownLen < MirrorHealthTracker.MIN_VALID_VIDEO_BYTES) {
                 return@launch
             }
-            val mirrors = getVerifiedRangeMirrors(activeUrl, allSources)
+            val mirrors = getVerifiedRangeMirrors(activeUrl, allSources, knownLen)
             if (mirrors.isEmpty()) return@launch
             val cacheKey = explicitCacheKey?.takeIf { it.isNotBlank() }
-                ?: buildEpisodeCacheKey(episodeKey, meta.contentLength, activeUrl)
+                ?: buildEpisodeCacheKey(episodeKey, knownLen, activeUrl)
+            val index = getVideoIndex(episodeKey)
             synchronized(boosterLock) {
                 coroutineContext.ensureActive()
-                applyContentLengthMetadata(cacheKey, meta.contentLength)
+                applyContentLengthMetadata(cacheKey, knownLen)
                 chunkBooster.startStreamingBoost(
-                cacheKey = cacheKey,
-                mirrors = mirrors,
-                totalLength = meta.contentLength,
-                initialPositionMs = initialPositionMs,
-                initialDurationMs = initialDurationMs,
-                opEndMs = opEndMs
+                    cacheKey = cacheKey,
+                    mirrors = mirrors,
+                    totalLength = knownLen,
+                    initialPositionMs = initialPositionMs,
+                    initialDurationMs = initialDurationMs,
+                    opEndMs = opEndMs,
+                    videoIndex = index
                 )
             }
         }
@@ -602,9 +838,20 @@ class VideoCacheManager(
         chunkBooster.stopStreamingBoost()
     }
 
+    fun markEpisodeCompleted(episodeKey: String?, cacheKey: String?) {
+        if (!cacheKey.isNullOrBlank()) {
+            cacheEvictor.unpinKey(cacheKey)
+        }
+        if (!episodeKey.isNullOrBlank()) {
+            warmupPool.releaseEpisode(episodeKey)
+        }
+    }
+
     fun trimMemory() {
-        probeMetaByUrl.trimToSize(24)
+        probeMetaByUrl.trimToSize(32)
+        videoIndexByEpisode.trimToSize(48)
         chunkBooster.trimBuffers()
+        warmupPool.releaseAll()
     }
 
     private fun applyContentLengthMetadata(cacheKey: String, totalLength: Long) {
@@ -620,10 +867,14 @@ class VideoCacheManager(
     }
 
     fun cancelPreloadsExcept(activeKeyOrUrl: String?) {
+        cancelPreloadsExcept(if (activeKeyOrUrl.isNullOrBlank()) emptySet() else setOf(activeKeyOrUrl))
+    }
+
+    fun cancelPreloadsExcept(keepKeys: Set<String>) {
         val iterator = activePreloadJobs.entries.iterator()
         while (iterator.hasNext()) {
             val (key, job) = iterator.next()
-            if (key != activeKeyOrUrl) {
+            if (key !in keepKeys) {
                 activeWriters[key]?.cancel()
                 job.cancel()
                 iterator.remove()
@@ -635,8 +886,12 @@ class VideoCacheManager(
 
     suspend fun clearAll() = withContext(Dispatchers.IO) {
         stopPlaybackBooster()
-        cancelPreloadsExcept(null)
+        cancelPreloadsExcept(emptySet())
+        warmupPool.releaseAll()
         probeMetaByUrl.clear()
+        videoIndexByEpisode.clear()
+        diskLengthByEpisode.clear()
+        cacheEvictor.clearPins()
         runCatching {
             simpleCache.keys.toList().forEach { key ->
                 simpleCache.removeResource(key)
@@ -647,12 +902,16 @@ class VideoCacheManager(
     companion object {
         const val CHUNK_SIZE_BYTES = 512L * 1024L
         private const val CACHE_SINK_FRAGMENT_BYTES = 2L * 1024L * 1024L
-        const val DEFAULT_PRELOAD_BYTES = 2L * 1024L * 1024L
+        const val DEFAULT_PRELOAD_BYTES = 4L * 1024L * 1024L
+        const val MIN_PLAYABLE_HOT_BYTES = 1536L * 1024L
         private const val VIDEO_CACHE_BASE_BYTES = 512L * 1024L * 1024L
         private const val VIDEO_CACHE_LARGE_BYTES = 1024L * 1024L * 1024L
+        private const val VIDEO_CACHE_XLARGE_BYTES = 2L * 1024L * 1024L * 1024L
         private const val LARGE_DISK_THRESHOLD_BYTES = 4L * 1024L * 1024L * 1024L
+        private const val XLARGE_DISK_THRESHOLD_BYTES = 12L * 1024L * 1024L * 1024L
         private const val DEFAULT_BUFFER_SIZE = 64 * 1024
-        private const val MAX_PROBE_CACHE = 64
+        private const val MAX_PROBE_CACHE = 128
+        private const val MAX_VIDEO_INDEX_CACHE = 160
 
         fun buildEpisodeCacheKey(
             episodeKey: String?,
@@ -666,7 +925,11 @@ class VideoCacheManager(
         }
 
         fun calculateVideoCacheMaxBytes(usableSpaceBytes: Long): Long {
-            val target = if (usableSpaceBytes >= LARGE_DISK_THRESHOLD_BYTES) VIDEO_CACHE_LARGE_BYTES else VIDEO_CACHE_BASE_BYTES
+            val target = when {
+                usableSpaceBytes >= XLARGE_DISK_THRESHOLD_BYTES -> VIDEO_CACHE_XLARGE_BYTES
+                usableSpaceBytes >= LARGE_DISK_THRESHOLD_BYTES -> VIDEO_CACHE_LARGE_BYTES
+                else -> VIDEO_CACHE_BASE_BYTES
+            }
             return minOf(target, usableSpaceBytes.coerceAtLeast(0L) / 4)
         }
 

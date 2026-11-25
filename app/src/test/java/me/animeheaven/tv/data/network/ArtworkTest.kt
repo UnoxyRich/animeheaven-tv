@@ -113,6 +113,8 @@ class ArtworkTest {
         override suspend fun get(cacheKey: String) = rows[cacheKey]
         override suspend fun getByKeys(keys: List<String>) = keys.mapNotNull(rows::get)
         override suspend fun getRecentDetails(limit: Int) = emptyList<WebCacheEntity>()
+        override suspend fun getRecentStreams(limit: Int) = emptyList<WebCacheEntity>()
+        override suspend fun getRecentVideoMeta(limit: Int) = emptyList<WebCacheEntity>()
         override suspend fun getRecentArtwork(since: Long, limit: Int) = rows.values.filter { it.fetchedAt >= since }.take(limit)
         override suspend fun upsert(entity: WebCacheEntity) { rows[entity.cacheKey] = entity }
         override suspend fun delete(cacheKey: String) { rows.remove(cacheKey) }

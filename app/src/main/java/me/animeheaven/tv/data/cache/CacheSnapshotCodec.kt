@@ -280,6 +280,63 @@ object CacheSnapshotCodec {
         result
     }.getOrNull()
 
+    fun encodeEpisodeVideoIndex(index: EpisodeVideoIndex): String = buildString(1024) {
+        append('{')
+        writeStrField("k", index.episodeKey, first = true)
+        writeLongField("len", index.contentLength)
+        writeLongField("dur", index.durationMs)
+        writeLongField("mo", index.moovOffset)
+        writeLongField("ms", index.moovSize)
+        writeLongField("at", index.updatedAtMs)
+        writeArrayField("sp", index.seekPoints) { pt ->
+            append('[')
+            append(pt.timeMs)
+            append(',')
+            append(pt.byteOffset)
+            append(']')
+        }
+        append('}')
+    }
+
+    fun decodeEpisodeVideoIndex(json: String): EpisodeVideoIndex? = runCatching {
+        val r = StreamingJsonReader(json)
+        var key: String? = null
+        var len = -1L
+        var dur = 0L
+        var moovOffset = -1L
+        var moovSize = 0L
+        var updatedAt = 0L
+        var seekPoints: List<Mp4SeekPoint> = emptyList()
+
+        r.readObject { field ->
+            when (field) {
+                "k" -> key = r.readNullableString()
+                "len" -> len = r.readLong()
+                "dur" -> dur = r.readLong()
+                "mo" -> moovOffset = r.readLong()
+                "ms" -> moovSize = r.readLong()
+                "at" -> updatedAt = r.readLong()
+                "sp" -> seekPoints = r.readListNotNull {
+                    val pair = r.readLongPair()
+                    pair?.let { (t, b) -> Mp4SeekPoint(t, b) }
+                }
+                else -> r.skipValue()
+            }
+        }
+        r.expectEof()
+        val resolvedKey = key ?: return null
+        if (len <= 0L) return null
+        EpisodeVideoIndex(
+            episodeKey = resolvedKey,
+            contentLength = len,
+            durationMs = dur.coerceAtLeast(0L),
+            moovOffset = moovOffset,
+            moovSize = moovSize.coerceAtLeast(0L),
+            seekPoints = seekPoints,
+            updatedAtMs = updatedAt
+        )
+    }.getOrNull()
+
     private fun readBannerItem(r: StreamingJsonReader): BannerItem? {
         var id: String? = null
         var title = ""
@@ -396,6 +453,13 @@ object CacheSnapshotCodec {
         writeJsonString(name)
         append(':')
         if (value == null) append("null") else writeJsonString(value)
+    }
+
+    private fun StringBuilder.writeLongField(name: String, value: Long, first: Boolean = false) {
+        if (!first) append(',')
+        writeJsonString(name)
+        append(':')
+        append(value)
     }
 
     private inline fun <T> StringBuilder.writeArrayField(
@@ -533,6 +597,29 @@ object CacheSnapshotCodec {
                     null
                 }
             }
+        }
+
+        fun readLong(): Long {
+            skipWs()
+            val match = JSON_NUMBER.matchAt(s, pos)
+                ?: throw IllegalArgumentException("Expected JSON number at $pos")
+            pos = match.range.last + 1
+            return match.value.toLong()
+        }
+
+        fun readLongPair(): Pair<Long, Long>? {
+            skipWs()
+            if (pos >= len || s[pos] != '[') throw IllegalArgumentException("Expected '[' at $pos")
+            pos++
+            val a = readLong()
+            skipWs()
+            if (pos >= len || s[pos] != ',') throw IllegalArgumentException("Expected ',' at $pos")
+            pos++
+            val b = readLong()
+            skipWs()
+            if (pos >= len || s[pos] != ']') throw IllegalArgumentException("Expected ']' at $pos")
+            pos++
+            return a to b
         }
 
         fun readString(): String {
